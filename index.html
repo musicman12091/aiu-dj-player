@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>AI: Underground — A57 Live DJ Queue & Suno Embed Spike</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17" async></script>
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: #090b10;
+      color: #f1f5f9;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .custom-scroll::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scroll::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    .custom-scroll::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 9999px;
+    }
+    @keyframes pulse-border {
+      0%, 100% { border-color: rgba(16, 185, 129, 0.7); }
+      50% { border-color: rgba(16, 185, 129, 0.25); }
+    }
+    .playing-glow {
+      animation: pulse-border 2.5s infinite ease-in-out;
+    }
+    .hidden { display: none !important; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-emerald-500 selection:text-slate-950">
+
+  <!-- Top Sticky Header -->
+  <header class="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-800 px-3 py-2.5 sm:px-6">
+    <div class="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2">
+      <div class="flex items-center gap-2.5">
+        <span class="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 font-bold text-sm">
+          AIU
+        </span>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-sm sm:text-base font-bold tracking-tight text-white">AI: Underground DJ Deck</h1>
+            <span class="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+              A57 Spike v1.0
+            </span>
+          </div>
+          <p class="text-[11px] text-slate-400 hidden sm:block">
+            Persistent Suno Web Embed • Zero Re-Hosting • Independent Live Running Order
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="btnLoadDemoSet" type="button" class="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">
+          Reset A/B/C Demo
+        </button>
+        <button id="btnToggleFallback" type="button" class="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition">
+          Fallback Guide
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Toast / Status Banner -->
+  <div id="statusBanner" class="bg-slate-900/90 border-b border-slate-800 px-3 py-2 text-xs text-slate-300">
+    <div class="max-w-6xl mx-auto flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 truncate">
+        <span id="statusDot" class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
+        <span id="statusText" class="truncate font-medium">Ready for A57 + Discord Performance-mode rehearsal. Editing queue will NEVER reload the active player frame.</span>
+      </div>
+      <span id="mountCountBadge" class="shrink-0 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-300 border border-slate-700">
+        Frame Mounts: 0
+      </span>
+    </div>
+  </div>
+
+  <!-- Collapsible Fallback Recovery Modal/Drawer -->
+  <section id="fallbackPanel" class="hidden bg-rose-950/30 border-b border-rose-500/30 px-4 py-3 text-xs text-rose-100">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div class="space-y-1">
+        <p class="font-semibold text-rose-300 uppercase tracking-wider text-[11px]">Emergency Recovery to Known-Working Suno + Discord Setup</p>
+        <p class="text-slate-200">
+          1. Keep Discord voice call &amp; Performance screen-share running on the A57. 2. Tap <strong>Open in Suno App/Browser</strong> on the current or next track below to launch directly in your native Suno Android app. 3. Resume playback from native Suno while keeping your running order visible here.
+        </p>
+      </div>
+      <button id="btnCloseFallback" type="button" class="self-start sm:self-center shrink-0 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 font-medium">
+        Hide Recovery Note
+      </button>
+    </div>
+  </section>
+
+  <!-- Main Content Grid -->
+  <main class="flex-1 max-w-6xl w-full mx-auto p-3 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6">
+
+    <!-- Left Column: Persistent Now Playing Frame + Quick Transport + Link Dropbox (5 cols on lg) -->
+    <div class="lg:col-span-5 flex flex-col gap-4">
+
+      <!-- Persistent Now Playing Deck -->
+      <section class="rounded-2xl bg-slate-900/90 border-2 border-emerald-500/50 playing-glow p-3.5 sm:p-4 shadow-xl">
+        <div class="flex items-center justify-between gap-2 mb-2.5">
+          <div class="flex items-center gap-2">
+            <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+            <h2 class="text-xs font-bold uppercase tracking-wider text-emerald-300">Persistent Now Playing Frame</h2>
+          </div>
+          <span id="nowPlayingStateBadge" class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+            IDLE
+          </span>
+        </div>
+
+        <!-- Track Meta Info -->
+        <div class="mb-3 bg-slate-950/80 rounded-xl p-3 border border-slate-800">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <p id="npTitle" class="text-sm sm:text-base font-bold text-white truncate">No Track Mounted Yet</p>
+              <p id="npArtist" class="text-xs text-slate-400 truncate mt-0.5">Tap "Load Song A" or "Play Next Now" below</p>
+            </div>
+            <a id="npExternalLink" href="https://suno.com" target="_blank" rel="noopener noreferrer" class="shrink-0 text-[11px] font-medium px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 transition">
+              Open in Suno ↗
+            </a>
+          </div>
+          <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400 font-mono">
+            <span id="npSongId">UUID: —</span>
+            <span>•</span>
+            <span id="npMountTime">Mounted: —</span>
+          </div>
+        </div>
+
+        <!-- Persistent Iframe Container (Never touched during queue edits!) -->
+        <div class="relative w-full rounded-xl overflow-hidden bg-slate-950 border border-slate-800" style="min-height: 160px;">
+          <div id="iframePlaceholder" class="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-slate-950 z-10">
+            <p class="text-xs font-medium text-slate-300 mb-1">Persistent Suno Embed Slot Ready</p>
+            <p class="text-[11px] text-slate-400 max-w-xs mb-3">
+              Tap <strong>Start / Advance to Up Next</strong> below to mount the first track. Reordering or adding songs below will never reload this iframe.
+            </p>
+            <button id="btnMountFirstTrack" type="button" class="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition shadow">
+              ▶ Mount First Track from Up Next
+            </button>
+          </div>
+          <iframe
+            id="sunoEmbedFrame"
+            title="Suno Embedded Player"
+            src="about:blank"
+            class="w-full h-[160px] sm:h-[200px] border-0"
+            allow="autoplay; encrypted-media; fullscreen"
+            loading="eager"
+          ></iframe>
+        </div>
+
+        <!-- Explicit DJ Transport Controls -->
+        <div class="mt-3 grid grid-cols-2 gap-2.5">
+          <button id="btnAdvanceNext" type="button" class="col-span-2 flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-slate-950 font-bold text-sm shadow-lg shadow-emerald-500/10 transition">
+            <span>⏭ Explicit Next: Load Top of "Up Next"</span>
+          </button>
+          <button id="btnReloadCurrent" type="button" class="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs border border-slate-700 transition">
+            ↻ Reload Current Frame
+          </button>
+          <button id="btnMarkFailed" type="button" class="py-2 px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 font-medium text-xs border border-rose-500/30 transition">
+            ⚠ Mark Track Unavailable
+          </button>
+        </div>
+
+        <p class="mt-2.5 text-[11px] text-slate-400 leading-relaxed">
+          <strong>A57 Note:</strong> Cross-origin iframes do not auto-expose track completion. When a song finishes, tap <strong>Explicit Next</strong> above, then tap Play inside the Suno embed if Android blocks autoplay.
+        </p>
+      </section>
+
+      <!-- Submission / Link Drop-Box Simulator -->
+      <section class="rounded-2xl bg-slate-900/90 border border-slate-800 p-3.5 sm:p-4">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-sky-300">Artist Link Drop-Box / Quick Add</h2>
+          <span class="text-[11px] text-slate-400">No Audio Uploads • Links Only</span>
+        </div>
+
+        <form id="addLinkForm" class="space-y-2.5">
+          <div>
+            <label for="inputSunoUrl" class="block text-[11px] font-medium text-slate-300 mb-1">
+              Suno Song Link or UUID (Paste full URL, embed URL, or Discord message with link)
+            </label>
+            <input
+              id="inputSunoUrl"
+              type="text"
+              placeholder="https://suno.com/song/b0e0bef4-e8b1-4b52-aee6-db1bd8124c55"
+              class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+            />
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label for="inputTrackTitle" class="block text-[11px] font-medium text-slate-300 mb-1">Track Label / Title</label>
+              <input
+                id="inputTrackTitle"
+                type="text"
+                placeholder="e.g. Song C (Live Request)"
+                class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+              />
+            </div>
+            <div>
+              <label for="inputArtistName" class="block text-[11px] font-medium text-slate-300 mb-1">Submitted By (Discord Artist)</label>
+              <input
+                id="inputArtistName"
+                type="text"
+                placeholder="e.g. @NeonSynth_AIU"
+                class="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+              />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2 pt-1">
+            <button id="btnAddToUpNext" type="submit" class="py-2.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition">
+              + Add Straight to Up Next
+            </button>
+            <button id="btnAddToIncoming" type="button" class="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 font-semibold text-xs border border-sky-500/30 transition">
+              📥 Drop into Incoming Inbox
+            </button>
+          </div>
+        </form>
+
+        <!-- One-Tap Rehearsal Injection Shortcut -->
+        <div class="mt-3 pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <span class="text-[11px] text-slate-400">Testing A/B/C Rehearsal?</span>
+          <button id="btnInjectSongC" type="button" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition">
+            ⚡ Inject "Song C" Request &amp; Place Ahead of Song B
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <!-- Right Column: Live Queue Control (Up Next / Incoming / Hold / Played) + Rehearsal Verification (7 cols on lg) -->
+    <div class="lg:col-span-7 flex flex-col gap-4">
+
+      <!-- Queue Filter Tabs & Summary Counts -->
+      <section class="rounded-2xl bg-slate-900/90 border border-slate-800 p-3.5 sm:p-4 flex flex-col gap-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 class="text-sm font-bold text-white">Live Running Order &amp; Queue Control</h2>
+            <p class="text-[11px] text-slate-400">Reorder, hold, approve, or remove tracks below while the top player stays untouched.</p>
+          </div>
+          <button id="btnClearPlayed" type="button" class="text-[11px] font-medium px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+            Clear Played History
+          </button>
+        </div>
+
+        <!-- State Filter Pills -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <button id="tabUpNext" type="button" data-tab="queued" class="queue-tab flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 transition">
+            <span>Up Next</span>
+            <span id="countQueued" class="px-1.5 py-0.5 rounded bg-slate-950/80 text-[11px] font-mono">0</span>
+          </button>
+          <button id="tabIncoming" type="button" data-tab="incoming" class="queue-tab flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700 transition">
+            <span>Incoming Inbox</span>
+            <span id="countIncoming" class="px-1.5 py-0.5 rounded bg-slate-900 text-[11px] font-mono">0</span>
+          </button>
+          <button id="tabHold" type="button" data-tab="hold" class="queue-tab flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700 transition">
+            <span>On Hold</span>
+            <span id="countHold" class="px-1.5 py-0.5 rounded bg-slate-900 text-[11px] font-mono">0</span>
+          </button>
+          <button id="tabPlayed" type="button" data-tab="played" class="queue-tab flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700 transition">
+            <span>Played / Failed</span>
+            <span id="countPlayed" class="px-1.5 py-0.5 rounded bg-slate-900 text-[11px] font-mono">0</span>
+          </button>
+        </div>
+
+        <!-- Dynamic Queue Items List -->
+        <div id="queueListContainer" class="space-y-2.5 min-h-[240px] max-h-[420px] overflow-y-auto custom-scroll pr-1">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- A57 Live Rehearsal Scorecard & Audit Log -->
+      <section class="rounded-2xl bg-slate-900/90 border border-slate-800 p-3.5 sm:p-4 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 class="text-xs font-bold uppercase tracking-wider text-amber-300">A57 + Discord Listener Acceptance Checklist</h2>
+            <p class="text-[11px] text-slate-400">Tap each check during your live A57 rehearsal, then copy the report back to chat.</p>
+          </div>
+          <button id="btnCopyDiagnostic" type="button" class="text-xs font-bold px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 transition">
+            📋 Copy A57 Test Report
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+            <input id="chkEmbedPlays" type="checkbox" class="mt-0.5 rounded border-slate-700 text-emerald-500 focus:ring-0" />
+            <span><strong>1. Suno Embed Plays on A57:</strong> Song A starts and plays inside the top frame without forcing native app switch.</span>
+          </label>
+          <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+            <input id="chkQueueNoInterrupt" type="checkbox" class="mt-0.5 rounded border-slate-700 text-emerald-500 focus:ring-0" />
+            <span><strong>2. Zero-Interruption Queue Edit:</strong> Adding Song C and moving it ahead of Song B does NOT pause or restart Song A.</span>
+          </label>
+          <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+            <input id="chkDiscordAudio" type="checkbox" class="mt-0.5 rounded border-slate-700 text-emerald-500 focus:ring-0" />
+            <span><strong>3. Remote Discord Listener Audio:</strong> Listener hears Song A and deliberate transition to Song C in Performance mode.</span>
+          </label>
+          <label class="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+            <input id="chkHostMicAndTaps" type="checkbox" class="mt-0.5 rounded border-slate-700 text-emerald-500 focus:ring-0" />
+            <span><strong>4. DJ Ergonomics &amp; Mic:</strong> Manual Next/Play tap count is manageable on the A57 and host voice remains audible.</span>
+          </label>
+        </div>
+
+        <!-- Audit Log Output -->
+        <div>
+          <div class="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+            <span class="font-semibold uppercase tracking-wider">Non-Destructive Action Audit Log</span>
+            <button id="btnClearLog" type="button" class="hover:text-slate-200 underline">Clear Log</button>
+          </div>
+          <div id="auditLogBox" class="h-28 overflow-y-auto custom-scroll rounded-xl bg-slate-950 border border-slate-800 p-2.5 font-mono text-[11px] text-slate-300 space-y-1">
+            <!-- Populated by JS -->
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      const STORAGE_KEY = 'aiu_a57_dj_spike_state_v1';
+
+      // Default Verified Public Suno UUIDs for A/B/C Rehearsal
+      function getInitialTracks() {
+        return [
+          {
+            id: 'trk_song_a',
+            songUuid: 'b0e0bef4-e8b1-4b52-aee6-db1bd8124c55',
+            title: 'Song A — Floodlight Fever (Rehearsal Opener)',
+            artist: '@SunnyvaleBeats',
+            originalUrl: 'https://suno.com/song/b0e0bef4-e8b1-4b52-aee6-db1bd8124c55',
+            status: 'queued',
+            addedAt: '11:20 AM'
+          },
+          {
+            id: 'trk_song_b',
+            songUuid: '6bbb126c-fea4-4492-95ff-84f311926b0a',
+            title: 'Song B — Midnight Lot Cruise (Scheduled #2)',
+            artist: '@BubblesSynth',
+            originalUrl: 'https://suno.com/song/6bbb126c-fea4-4492-95ff-84f311926b0a',
+            status: 'queued',
+            addedAt: '11:21 AM'
+          },
+          {
+            id: 'trk_incoming_demo',
+            songUuid: '5cec4681-7a50-430a-b7a3-e0aac73eba3e',
+            title: 'Incoming Request — Neon Afterparty Dub',
+            artist: '@JToTheR_O_C',
+            originalUrl: 'https://suno.com/song/5cec4681-7a50-430a-b7a3-e0aac73eba3e',
+            status: 'incoming',
+            addedAt: '11:22 AM'
+          }
+        ];
+      }
+
+      let state = {
+        activeTab: 'queued',
+        nowPlaying: null,
+        frameMountCount: 0,
+        lastMountedUuid: null,
+        tracks: getInitialTracks(),
+        checks: {
+          chkEmbedPlays: false,
+          chkQueueNoInterrupt: false,
+          chkDiscordAudio: false,
+          chkHostMicAndTaps: false
+        },
+        logs: []
+      };
+
+      // Safe localStorage load/save
+      function loadState() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && Array.isArray(parsed.tracks)) {
+              state.tracks = parsed.tracks;
+              state.activeTab = parsed.activeTab || 'queued';
+              state.nowPlaying = parsed.nowPlaying || null;
+              state.checks = Object.assign(state.checks, parsed.checks || {});
+            }
+          }
+        } catch (err) {
+          // Ignore storage restrictions in sandboxed iframe
+        }
+      }
+
+      function saveState() {
+        try {
+          localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+              activeTab: state.activeTab,
+              nowPlaying: state.nowPlaying,
+              tracks: state.tracks,
+              checks: state.checks
+            })
+          );
+        } catch (err) {
+          // Ignore storage restrictions
+        }
+      }
+
+      function timestamp() {
+        const d = new Date();
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+
+      function addLog(msg, tone) {
+        const entry = {
+          time: timestamp(),
+          msg: msg,
+          tone: tone || 'info'
+        };
+        state.logs.unshift(entry);
+        if (state.logs.length > 60) {
+          state.logs.pop();
+        }
+        renderLogs();
+        const statusText = document.getElementById('statusText');
+        const statusDot = document.getElementById('statusDot');
+        if (statusText) statusText.textContent = msg;
+        if (statusDot) {
+          statusDot.className =
+            'w-2 h-2 rounded-full shrink-0 ' +
+            (tone === 'error'
+              ? 'bg-rose-400'
+              : tone === 'warn'
+              ? 'bg-amber-400'
+              : 'bg-emerald-400');
+        }
+      }
+
+      // Extract one or more Suno UUIDs or short-link codes from pasted text or Discord chat lines
+      function parseAllSunoSubmissions(input) {
+        if (!input) return [];
+        const text = String(input);
+        const found = [];
+        const seen = {};
+
+        const uuidGlobal = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g;
+        let m;
+        while ((m = uuidGlobal.exec(text)) !== null) {
+          const uuid = m[1].toLowerCase();
+          if (!seen[uuid]) {
+            seen[uuid] = true;
+            found.push({
+              kind: 'uuid',
+              songUuid: uuid,
+              originalUrl: 'https://suno.com/song/' + uuid
+            });
+          }
+        }
+
+        const shortGlobal = /https?:\/\/(?:www\.)?suno\.(?:com|ai)\/s\/([A-Za-z0-9_-]{4,32})/gi;
+        while ((m = shortGlobal.exec(text)) !== null) {
+          const code = m[1];
+          const key = 'short-' + code;
+          if (!seen[key]) {
+            seen[key] = true;
+            found.push({
+              kind: 'shortlink',
+              songUuid: key,
+              originalUrl: 'https://suno.com/s/' + code
+            });
+          }
+        }
+        return found;
+      }
+
+      // CRITICAL ARCHITECTURAL SEPARATION:
+      // mountTrackIntoIframe() is ONLY called on explicit user playback commands.
+      // Queue edits (add, reorder, hold, remove, tab switch) NEVER call this function.
+      function mountTrackIntoIframe(track, forceReload) {
+        if (!track) return;
+        const iframe = document.getElementById('sunoEmbedFrame');
+        const placeholder = document.getElementById('iframePlaceholder');
+        const isShortLink = String(track.songUuid || '').startsWith('short-');
+        const embedUrl = isShortLink ? track.originalUrl : ('https://suno.com/embed/' + track.songUuid);
+
+        if (placeholder) {
+          placeholder.classList.add('hidden');
+        }
+
+        if (forceReload || state.lastMountedUuid !== track.songUuid) {
+          iframe.src = embedUrl;
+          state.lastMountedUuid = track.songUuid;
+          state.frameMountCount += 1;
+        }
+
+        state.nowPlaying = {
+          id: track.id,
+          songUuid: track.songUuid,
+          title: track.title,
+          artist: track.artist,
+          originalUrl: track.originalUrl,
+          mountedAt: timestamp()
+        };
+
+        renderNowPlayingMeta();
+      }
+
+      function renderNowPlayingMeta() {
+        const badge = document.getElementById('nowPlayingStateBadge');
+        const titleEl = document.getElementById('npTitle');
+        const artistEl = document.getElementById('npArtist');
+        const linkEl = document.getElementById('npExternalLink');
+        const uuidEl = document.getElementById('npSongId');
+        const mountTimeEl = document.getElementById('npMountTime');
+        const mountCountBadge = document.getElementById('mountCountBadge');
+
+        if (mountCountBadge) {
+          mountCountBadge.textContent = 'Frame Mounts: ' + state.frameMountCount;
+        }
+
+        if (!state.nowPlaying) {
+          badge.textContent = 'IDLE';
+          badge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700';
+          titleEl.textContent = 'No Track Mounted Yet';
+          artistEl.textContent = 'Tap "Mount First Track" or "Explicit Next" to load Song A';
+          linkEl.href = 'https://suno.com';
+          uuidEl.textContent = 'UUID: —';
+          mountTimeEl.textContent = 'Mounted: —';
+          return;
+        }
+
+        badge.textContent = 'ACTIVE IN FRAME';
+        badge.className = 'text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+        titleEl.textContent = state.nowPlaying.title;
+        artistEl.textContent = 'Submitted by ' + state.nowPlaying.artist;
+        linkEl.href = state.nowPlaying.originalUrl || ('https://suno.com/song/' + state.nowPlaying.songUuid);
+        uuidEl.textContent = 'UUID: ' + state.nowPlaying.songUuid.slice(0, 8) + '…';
+        mountTimeEl.textContent = 'Mounted: ' + state.nowPlaying.mountedAt;
+      }
+
+      // Render Queue List without touching the iframe
+      function renderQueue() {
+        const counts = {
+          queued: 0,
+          incoming: 0,
+          hold: 0,
+          played: 0
+        };
+
+        state.tracks.forEach(function (t) {
+          if (t.status === 'queued') counts.queued += 1;
+          else if (t.status === 'incoming') counts.incoming += 1;
+          else if (t.status === 'hold') counts.hold += 1;
+          else if (t.status === 'played' || t.status === 'failed') counts.played += 1;
+        });
+
+        document.getElementById('countQueued').textContent = String(counts.queued);
+        document.getElementById('countIncoming').textContent = String(counts.incoming);
+        document.getElementById('countHold').textContent = String(counts.hold);
+        document.getElementById('countPlayed').textContent = String(counts.played);
+
+        // Update tab styles
+        const tabButtons = document.querySelectorAll('.queue-tab');
+        tabButtons.forEach(function (btn) {
+          const tab = btn.getAttribute('data-tab');
+          if (tab === state.activeTab) {
+            btn.className = 'queue-tab flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 transition';
+          } else {
+            btn.className = 'queue-tab flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold bg-slate-950 text-slate-300 border border-slate-800 hover:border-slate-700 transition';
+          }
+        });
+
+        const container = document.getElementById('queueListContainer');
+        container.innerHTML = '';
+
+        const filtered = state.tracks.filter(function (t) {
+          if (state.activeTab === 'played') {
+            return t.status === 'played' || t.status === 'failed';
+          }
+          return t.status === state.activeTab;
+        });
+
+        if (filtered.length === 0) {
+          const emptyDiv = document.createElement('div');
+          emptyDiv.className = 'rounded-xl bg-slate-950/60 border border-dashed border-slate-800 p-6 text-center text-xs text-slate-400';
+          emptyDiv.textContent = 'No tracks in this view right now.';
+          container.appendChild(emptyDiv);
+          return;
+        }
+
+        filtered.forEach(function (track, idx) {
+          const card = document.createElement('div');
+          card.className = 'rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition';
+
+          const statusChip =
+            track.status === 'queued'
+              ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">#' + (idx + 1) + ' UP NEXT</span>'
+              : track.status === 'incoming'
+              ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/15 text-sky-300 border border-sky-500/30">INCOMING</span>'
+              : track.status === 'hold'
+              ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">ON HOLD</span>'
+              : track.status === 'failed'
+              ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">UNAVAILABLE</span>'
+              : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400">PLAYED</span>';
+
+          const leftHtml =
+            '<div class="min-w-0 space-y-1">' +
+              '<div class="flex flex-wrap items-center gap-2">' +
+                statusChip +
+                '<span class="text-xs sm:text-sm font-bold text-white truncate">' + escapeHtml(track.title) + '</span>' +
+              '</div>' +
+              '<div class="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">' +
+                '<span>' + escapeHtml(track.artist) + '</span>' +
+                '<span>•</span>' +
+                '<span class="font-mono">' + escapeHtml(track.songUuid.slice(0, 8)) + '…</span>' +
+                '<span>•</span>' +
+                '<a href="' + escapeHtml(track.originalUrl || ('https://suno.com/song/' + track.songUuid)) + '" target="_blank" rel="noopener noreferrer" class="text-emerald-400 hover:underline">Suno Link ↗</a>' +
+              '</div>' +
+            '</div>';
+
+          let actionsHtml = '<div class="flex flex-wrap items-center gap-1.5 shrink-0">';
+
+          if (track.status === 'queued') {
+            actionsHtml +=
+              '<button type="button" data-action="move-up" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 border border-slate-700" title="Move Up">↑</button>' +
+              '<button type="button" data-action="move-down" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 border border-slate-700" title="Move Down">↓</button>' +
+              '<button type="button" data-action="play-now" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-xs font-bold text-emerald-300 border border-emerald-500/40">▶ Load Now</button>' +
+              '<button type="button" data-action="hold" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-xs font-medium text-amber-300 border border-amber-500/30">Hold</button>' +
+              '<button type="button" data-action="remove" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-xs font-medium text-rose-300 border border-rose-500/30">✕</button>';
+          } else if (track.status === 'incoming') {
+            actionsHtml +=
+              '<button type="button" data-action="approve-top" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-xs font-bold text-emerald-300 border border-emerald-500/40">⚡ Approve Next (#1)</button>' +
+              '<button type="button" data-action="approve-end" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-xs font-semibold text-sky-300 border border-sky-500/40">+ Queue End</button>' +
+              '<button type="button" data-action="hold" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-xs font-medium text-amber-300 border border-amber-500/30">Hold</button>' +
+              '<button type="button" data-action="remove" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-xs font-medium text-rose-300 border border-rose-500/30">✕</button>';
+          } else if (track.status === 'hold') {
+            actionsHtml +=
+              '<button type="button" data-action="approve-end" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-xs font-bold text-emerald-300 border border-emerald-500/40">Restore to Up Next</button>' +
+              '<button type="button" data-action="remove" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-xs font-medium text-rose-300 border border-rose-500/30">✕</button>';
+          } else {
+            actionsHtml +=
+              '<button type="button" data-action="requeue" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-emerald-300 border border-slate-700">↻ Re-Queue</button>' +
+              '<button type="button" data-action="remove" data-id="' + track.id + '" class="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-xs font-medium text-rose-300 border border-rose-500/30">✕</button>';
+          }
+
+          actionsHtml += '</div>';
+          card.innerHTML = leftHtml + actionsHtml;
+          container.appendChild(card);
+        });
+      }
+
+      function renderLogs() {
+        const box = document.getElementById('auditLogBox');
+        if (!box) return;
+        if (state.logs.length === 0) {
+          box.innerHTML = '<p class="text-slate-500">No actions recorded yet.</p>';
+          return;
+        }
+        box.innerHTML = state.logs
+          .map(function (item) {
+            const color =
+              item.tone === 'error'
+                ? 'text-rose-300'
+                : item.tone === 'warn'
+                ? 'text-amber-300'
+                : 'text-emerald-300';
+            return (
+              '<div class="flex items-start gap-2">' +
+              '<span class="text-slate-500 shrink-0">[' + escapeHtml(item.time) + ']</span>' +
+              '<span class="' + color + '">' + escapeHtml(item.msg) + '</span>' +
+              '</div>'
+            );
+          })
+          .join('');
+      }
+
+      function escapeHtml(str) {
+        return String(str || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      // Advance to the first track in 'queued'
+      function advanceToNextQueued() {
+        const nextIdx = state.tracks.findIndex(function (t) {
+          return t.status === 'queued';
+        });
+        if (nextIdx === -1) {
+          addLog('No tracks currently in "Up Next". Approve an incoming track or add a link first!', 'warn');
+          return;
+        }
+
+        // Archive current playing track into 'played' when transitioning to the next track
+        if (state.nowPlaying) {
+          const prevTrack = state.tracks.find(function (t) {
+            return t.id === state.nowPlaying.id;
+          });
+          if (prevTrack && prevTrack.status !== 'failed') {
+            prevTrack.status = 'played';
+          }
+        }
+
+        const nextTrack = state.tracks[nextIdx];
+        nextTrack.status = 'playing';
+        mountTrackIntoIframe(nextTrack, false);
+        saveState();
+        renderQueue();
+        addLog('Mounted "' + nextTrack.title + '" into persistent Suno frame (Frame Mounts: ' + state.frameMountCount + ').', 'info');
+      }
+
+      // Handle queue item actions via event delegation
+      function handleQueueAction(action, trackId) {
+        const index = state.tracks.findIndex(function (t) {
+          return t.id === trackId;
+        });
+        if (index === -1) return;
+        const track = state.tracks[index];
+
+        if (action === 'move-up' || action === 'move-down') {
+          const queuedIndices = [];
+          state.tracks.forEach(function (t, i) {
+            if (t.status === 'queued') queuedIndices.push(i);
+          });
+          const posInQueued = queuedIndices.indexOf(index);
+          if (posInQueued === -1) return;
+          const swapPos = action === 'move-up' ? posInQueued - 1 : posInQueued + 1;
+          if (swapPos < 0 || swapPos >= queuedIndices.length) {
+            addLog('Track "' + track.title + '" is already at the boundary of Up Next.', 'warn');
+            return;
+          }
+          const targetIndex = queuedIndices[swapPos];
+          const temp = state.tracks[index];
+          state.tracks[index] = state.tracks[targetIndex];
+          state.tracks[targetIndex] = temp;
+          saveState();
+          renderQueue();
+          addLog('Reordered "' + track.title + '" (' + (action === 'move-up' ? 'Moved Up' : 'Moved Down') + '). Active player frame NOT touched (Mounts: ' + state.frameMountCount + ').', 'info');
+        } else if (action === 'play-now') {
+          if (state.nowPlaying) {
+            const prevTrack = state.tracks.find(function (t) {
+              return t.id === state.nowPlaying.id;
+            });
+            if (prevTrack && prevTrack.status !== 'failed') {
+              prevTrack.status = 'played';
+            }
+          }
+          track.status = 'playing';
+          mountTrackIntoIframe(track, false);
+          saveState();
+          renderQueue();
+          addLog('Explicitly loaded "' + track.title + '" into Now Playing frame.', 'info');
+        } else if (action === 'hold') {
+          track.status = 'hold';
+          saveState();
+          renderQueue();
+          addLog('Placed "' + track.title + '" on Hold without interrupting playback.', 'warn');
+        } else if (action === 'remove') {
+          state.tracks.splice(index, 1);
+          saveState();
+          renderQueue();
+          addLog('Removed "' + track.title + '" from running order. Playback untouched.', 'warn');
+        } else if (action === 'approve-top') {
+          track.status = 'queued';
+          state.tracks.splice(index, 1);
+          const firstQueuedIdx = state.tracks.findIndex(function (t) {
+            return t.status === 'queued';
+          });
+          if (firstQueuedIdx === -1) {
+            state.tracks.push(track);
+          } else {
+            state.tracks.splice(firstQueuedIdx, 0, track);
+          }
+          state.activeTab = 'queued';
+          saveState();
+          renderQueue();
+          addLog('Approved "' + track.title + '" to #1 Up Next! Playing track uninterrupted.', 'info');
+        } else if (action === 'approve-end' || action === 'requeue') {
+          track.status = 'queued';
+          state.tracks.splice(index, 1);
+          state.tracks.push(track);
+          state.activeTab = 'queued';
+          saveState();
+          renderQueue();
+          addLog('Moved "' + track.title + '" to Up Next queue. Playing track uninterrupted.', 'info');
+        }
+      }
+
+      // Add a new Suno link to either 'queued' or 'incoming'
+      function addSubmittedTrack(targetStatus) {
+        const urlInput = document.getElementById('inputSunoUrl');
+        const titleInput = document.getElementById('inputTrackTitle');
+        const artistInput = document.getElementById('inputArtistName');
+
+        const rawUrl = urlInput.value.trim();
+        const items = parseAllSunoSubmissions(rawUrl);
+
+        if (items.length === 0) {
+          addLog('Invalid Suno link: Paste one or more Suno song links (suno.com/song/UUID), embed links, or short links (suno.com/s/CODE).', 'error');
+          return;
+        }
+
+        const customTitle = titleInput.value.trim();
+        const artist = artistInput.value.trim() || '@DiscordArtist';
+
+        items.forEach(function (parsed, idx) {
+          const uuid = parsed.songUuid;
+          const labelSuffix = items.length > 1 ? (' #' + (idx + 1)) : '';
+          const title = customTitle
+            ? (customTitle + labelSuffix)
+            : (parsed.kind === 'shortlink' ? ('Short-Link Request (' + uuid + ')') : ('Live Submission (' + uuid.slice(0, 6) + ')'));
+
+          state.tracks.push({
+            id: 'trk_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).slice(2, 6),
+            songUuid: uuid,
+            title: title,
+            artist: artist,
+            originalUrl: parsed.originalUrl,
+            status: targetStatus,
+            addedAt: timestamp()
+          });
+        });
+
+        state.activeTab = targetStatus;
+        urlInput.value = '';
+        titleInput.value = '';
+        artistInput.value = '';
+
+        saveState();
+        renderQueue();
+        addLog('Added ' + items.length + ' track(s) to ' + (targetStatus === 'queued' ? 'Up Next' : 'Incoming Inbox') + '. Active player frame untouched (Mounts: ' + state.frameMountCount + ').', 'info');
+      }
+
+      // One-tap A/B/C Rehearsal Helper: Inject Song C ahead of Song B while Song A plays
+      function injectSongCAheadOfB() {
+        const songCUuid = '5cec4681-7a50-430a-b7a3-e0aac73eba3e';
+        const songC = {
+          id: 'trk_song_c_' + Date.now(),
+          songUuid: songCUuid,
+          title: 'Song C — Live Party Request (Moved Ahead of B)',
+          artist: '@CoryAndTrevor_AIU',
+          originalUrl: 'https://suno.com/song/' + songCUuid,
+          status: 'queued',
+          addedAt: timestamp()
+        };
+
+        const firstQueuedIdx = state.tracks.findIndex(function (t) {
+          return t.status === 'queued';
+        });
+
+        if (firstQueuedIdx === -1) {
+          state.tracks.unshift(songC);
+        } else {
+          state.tracks.splice(firstQueuedIdx, 0, songC);
+        }
+
+        state.activeTab = 'queued';
+        saveState();
+        renderQueue();
+        addLog('Rehearsal Action: Injected "Song C" at #1 in Up Next (ahead of Song B) with ZERO reload of the Now Playing iframe!', 'info');
+      }
+
+      function copyDiagnosticReport() {
+        const reportLines = [
+          '=== AI: UNDERGROUND A57 + DISCORD SPIKE REPORT ===',
+          'Timestamp: ' + new Date().toISOString(),
+          'Now Playing: ' + (state.nowPlaying ? state.nowPlaying.title + ' (' + state.nowPlaying.songUuid + ')' : 'None'),
+          'Total Iframe Mounts: ' + state.frameMountCount,
+          'Up Next Count: ' + state.tracks.filter(function (t) { return t.status === 'queued'; }).length,
+          'Checklist Results:',
+          '  [ ' + (document.getElementById('chkEmbedPlays').checked ? 'PASS' : 'PENDING') + ' ] 1. Suno Embed Plays on A57',
+          '  [ ' + (document.getElementById('chkQueueNoInterrupt').checked ? 'PASS' : 'PENDING') + ' ] 2. Zero-Interruption Queue Edit (C ahead of B)',
+          '  [ ' + (document.getElementById('chkDiscordAudio').checked ? 'PASS' : 'PENDING') + ' ] 3. Remote Discord Listener Audio Confirmed',
+          '  [ ' + (document.getElementById('chkHostMicAndTaps').checked ? 'PASS' : 'PENDING') + ' ] 4. DJ Ergonomics & Host Mic Confirmed',
+          'Recent Logs:',
+          state.logs.slice(0, 8).map(function (l) { return '  [' + l.time + '] ' + l.msg; }).join('\n')
+        ];
+        const text = reportLines.join('\n');
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            addLog('Copied A57 Diagnostic Report to clipboard! Paste it in chat.', 'info');
+          }).catch(function () {
+            fallbackCopy(text);
+          });
+        } else {
+          fallbackCopy(text);
+        }
+      }
+
+      function fallbackCopy(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          addLog('Copied A57 Diagnostic Report to clipboard! Paste it in chat.', 'info');
+        } catch (err) {
+          addLog('Could not auto-copy report; screenshot or read the checklist.', 'warn');
+        }
+        document.body.removeChild(ta);
+      }
+
+      // Wire up all DOM listeners
+      window.addEventListener('DOMContentLoaded', function () {
+        loadState();
+
+        // Sync checkboxes
+        ['chkEmbedPlays', 'chkQueueNoInterrupt', 'chkDiscordAudio', 'chkHostMicAndTaps'].forEach(function (id) {
+          const el = document.getElementById(id);
+          if (el) {
+            el.checked = Boolean(state.checks[id]);
+            el.addEventListener('change', function () {
+              state.checks[id] = el.checked;
+              saveState();
+              addLog('Updated rehearsal check "' + id + '" to ' + (el.checked ? 'PASSED' : 'PENDING') + '.', 'info');
+            });
+          }
+        });
+
+        document.getElementById('btnMountFirstTrack').addEventListener('click', function () {
+          advanceToNextQueued();
+        });
+
+        document.getElementById('btnAdvanceNext').addEventListener('click', function () {
+          advanceToNextQueued();
+        });
+
+        document.getElementById('btnReloadCurrent').addEventListener('click', function () {
+          if (!state.nowPlaying) {
+            addLog('No track is currently mounted to reload.', 'warn');
+            return;
+          }
+          mountTrackIntoIframe(state.nowPlaying, true);
+          addLog('Force-reloaded current track "' + state.nowPlaying.title + '" in Suno embed.', 'warn');
+        });
+
+        document.getElementById('btnMarkFailed').addEventListener('click', function () {
+          if (!state.nowPlaying) {
+            addLog('No active track to mark unavailable.', 'warn');
+            return;
+          }
+          const matched = state.tracks.find(function (t) {
+            return t.id === state.nowPlaying.id;
+          });
+          if (matched) {
+            matched.status = 'failed';
+          }
+          addLog('Marked "' + state.nowPlaying.title + '" as UNAVAILABLE and advancing to next queued track...', 'error');
+          advanceToNextQueued();
+        });
+
+        document.getElementById('addLinkForm').addEventListener('submit', function (e) {
+          e.preventDefault();
+          addSubmittedTrack('queued');
+        });
+
+        document.getElementById('btnAddToIncoming').addEventListener('click', function () {
+          addSubmittedTrack('incoming');
+        });
+
+        document.getElementById('btnInjectSongC').addEventListener('click', function () {
+          injectSongCAheadOfB();
+        });
+
+        document.getElementById('btnLoadDemoSet').addEventListener('click', function () {
+          state.tracks = getInitialTracks();
+          state.activeTab = 'queued';
+          saveState();
+          renderQueue();
+          addLog('Reset Up Next & Incoming queues to the fresh A/B/C Rehearsal set (Active player untouched).', 'info');
+        });
+
+        document.getElementById('btnToggleFallback').addEventListener('click', function () {
+          const panel = document.getElementById('fallbackPanel');
+          panel.classList.toggle('hidden');
+        });
+
+        document.getElementById('btnCloseFallback').addEventListener('click', function () {
+          document.getElementById('fallbackPanel').classList.add('hidden');
+        });
+
+        document.getElementById('btnClearPlayed').addEventListener('click', function () {
+          state.tracks = state.tracks.filter(function (t) {
+            return t.status !== 'played' && t.status !== 'failed';
+          });
+          saveState();
+          renderQueue();
+          addLog('Cleared played/unavailable history. Active player untouched.', 'info');
+        });
+
+        document.getElementById('btnClearLog').addEventListener('click', function () {
+          state.logs = [];
+          renderLogs();
+        });
+
+        document.getElementById('btnCopyDiagnostic').addEventListener('click', function () {
+          copyDiagnosticReport();
+        });
+
+        // Filter tab clicks
+        document.querySelectorAll('.queue-tab').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            state.activeTab = btn.getAttribute('data-tab') || 'queued';
+            saveState();
+            renderQueue();
+          });
+        });
+
+        // Delegated clicks for queue item buttons
+        document.getElementById('queueListContainer').addEventListener('click', function (e) {
+          const btn = e.target.closest('button[data-action]');
+          if (!btn) return;
+          const action = btn.getAttribute('data-action');
+          const id = btn.getAttribute('data-id');
+          if (action && id) {
+            handleQueueAction(action, id);
+          }
+        });
+
+        renderNowPlayingMeta();
+        renderQueue();
+        addLog('AIU DJ Deck initialized. Step 1: Tap "Mount First Track" to load Song A, then test adding/reordering Song C!', 'info');
+      });
+    })();
+  </script>
+</body>
+</html>
