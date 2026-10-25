@@ -47,7 +47,7 @@
           <div class="flex items-center gap-2">
             <h1 class="text-sm sm:text-base font-bold tracking-tight text-white">AI: Underground DJ Deck</h1>
             <span class="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
-              A57 Spike v1.0
+              A57 Spike v1.1 (Auto-Resolver)
             </span>
           </div>
           <p class="text-[11px] text-slate-400 hidden sm:block">
@@ -150,6 +150,22 @@
             allow="autoplay; encrypted-media; fullscreen"
             loading="eager"
           ></iframe>
+        </div>
+
+        <!-- Secondary Direct Stream / Single-Tab Launcher (If Suno blocks mobile embed/shortlink) -->
+        <div class="mt-2.5 rounded-xl bg-slate-950/90 border border-slate-800 p-2.5 flex flex-col gap-2">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-[11px] font-semibold text-slate-300">If Embed Shows "Refused to Connect" (Short-Link / Auth Block):</span>
+            <div class="flex items-center gap-1.5">
+              <button id="btnLaunchPersistentTab" type="button" class="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 transition">
+                ↗ Launch in Reusable Suno Tab
+              </button>
+              <button id="btnResolveNowPlaying" type="button" class="text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 transition">
+                🔍 Force-Resolve Short Link
+              </button>
+            </div>
+          </div>
+          <audio id="directCdnAudio" controls preload="none" class="w-full h-8 hidden"></audio>
         </div>
 
         <!-- Explicit DJ Transport Controls -->
@@ -471,6 +487,58 @@
         return found;
       }
 
+      // Auto-resolve a suno.com/s/CODE short link into its canonical 36-char UUID & metadata
+      // using public CORS-friendly metadata/redirect endpoints so /embed/<UUID> never refuses to connect!
+      async function resolveShortLinkTrack(track, remountIfActive) {
+        if (!track || !String(track.songUuid || '').startsWith('short-')) return false;
+        const shortUrl = track.originalUrl;
+        addLog('Resolving short link ' + shortUrl + ' to real Suno Song UUID...', 'warn');
+
+        const resolvers = [
+          'https://api.microlink.io/?url=' + encodeURIComponent(shortUrl),
+          'https://api.allorigins.win/get?url=' + encodeURIComponent(shortUrl),
+          'https://corsproxy.io/?' + encodeURIComponent(shortUrl)
+        ];
+
+        const uuidRegex = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/;
+
+        for (let i = 0; i < resolvers.length; i++) {
+          try {
+            const resp = await fetch(resolvers[i]);
+            if (!resp.ok) continue;
+            const text = await resp.text();
+            const match = text.match(uuidRegex);
+            if (match) {
+              const realUuid = match[1].toLowerCase();
+              track.songUuid = realUuid;
+              track.originalUrl = 'https://suno.com/song/' + realUuid;
+
+              // Try to extract real song title from Microlink or OG tags if still generic
+              try {
+                const json = JSON.parse(text);
+                if (json && json.data && json.data.title && track.title.indexOf('Short-Link Request') === 0) {
+                  track.title = String(json.data.title).replace(/\s*\|\s*Suno.*$/i, '').trim() || track.title;
+                }
+              } catch (ignore) {}
+
+              saveState();
+              renderQueue();
+              addLog('Resolved short link -> UUID ' + realUuid.slice(0, 8) + '… (' + track.title + ')! Ready for /embed/ player.', 'info');
+
+              if (remountIfActive || (state.nowPlaying && state.nowPlaying.id === track.id)) {
+                mountTrackIntoIframe(track, true);
+              }
+              return true;
+            }
+          } catch (err) {
+            // Try next public resolver
+          }
+        }
+
+        addLog('Could not auto-resolve ' + shortUrl + ' in browser. Tap "Launch in Reusable Suno Tab" or paste the full suno.com/song/<UUID> URL.', 'error');
+        return false;
+      }
+
       // CRITICAL ARCHITECTURAL SEPARATION:
       // mountTrackIntoIframe() is ONLY called on explicit user playback commands.
       // Queue edits (add, reorder, hold, remove, tab switch) NEVER call this function.
@@ -478,17 +546,27 @@
         if (!track) return;
         const iframe = document.getElementById('sunoEmbedFrame');
         const placeholder = document.getElementById('iframePlaceholder');
+        const audioEl = document.getElementById('directCdnAudio');
         const isShortLink = String(track.songUuid || '').startsWith('short-');
-        const embedUrl = isShortLink ? track.originalUrl : ('https://suno.com/embed/' + track.songUuid);
 
         if (placeholder) {
           placeholder.classList.add('hidden');
         }
 
-        if (forceReload || state.lastMountedUuid !== track.songUuid) {
-          iframe.src = embedUrl;
-          state.lastMountedUuid = track.songUuid;
-          state.frameMountCount += 1;
+        if (isShortLink) {
+          // NEVER set iframe.src to https://suno.com/s/CODE because Suno returns X-Frame-Options: SAMEORIGIN ("refused to connect")!
+          addLog('Short link detected (' + track.originalUrl + '). Resolving UUID first so Suno does not refuse connection...', 'warn');
+          resolveShortLinkTrack(track, true);
+        } else {
+          const embedUrl = 'https://suno.com/embed/' + track.songUuid;
+          if (forceReload || state.lastMountedUuid !== track.songUuid) {
+            iframe.src = embedUrl;
+            state.lastMountedUuid = track.songUuid;
+            state.frameMountCount += 1;
+          }
+          if (audioEl) {
+            audioEl.src = 'https://cdn1.suno.ai/' + track.songUuid + '.mp3';
+          }
         }
 
         state.nowPlaying = {
@@ -809,7 +887,7 @@
             ? (customTitle + labelSuffix)
             : (parsed.kind === 'shortlink' ? ('Short-Link Request (' + uuid + ')') : ('Live Submission (' + uuid.slice(0, 6) + ')'));
 
-          state.tracks.push({
+          const addedTrack = {
             id: 'trk_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).slice(2, 6),
             songUuid: uuid,
             title: title,
@@ -817,7 +895,11 @@
             originalUrl: parsed.originalUrl,
             status: targetStatus,
             addedAt: timestamp()
-          });
+          };
+          state.tracks.push(addedTrack);
+          if (parsed.kind === 'shortlink') {
+            resolveShortLinkTrack(addedTrack, false);
+          }
         });
 
         state.activeTab = targetStatus;
@@ -926,6 +1008,30 @@
 
         document.getElementById('btnAdvanceNext').addEventListener('click', function () {
           advanceToNextQueued();
+        });
+
+        document.getElementById('btnLaunchPersistentTab').addEventListener('click', function () {
+          if (!state.nowPlaying) {
+            addLog('Mount or select a track first before launching the Reusable Suno Tab.', 'warn');
+            return;
+          }
+          const targetUrl = state.nowPlaying.originalUrl || ('https://suno.com/song/' + state.nowPlaying.songUuid);
+          window.open(targetUrl, 'aiu_suno_playback_deck');
+          addLog('Opened "' + state.nowPlaying.title + '" in reusable "aiu_suno_playback_deck" tab!', 'info');
+        });
+
+        document.getElementById('btnResolveNowPlaying').addEventListener('click', function () {
+          if (!state.nowPlaying) {
+            addLog('No active track to resolve.', 'warn');
+            return;
+          }
+          const matched = state.tracks.find(function (t) { return t.id === state.nowPlaying.id; }) || state.nowPlaying;
+          if (!String(matched.songUuid || '').startsWith('short-')) {
+            addLog('Current track already has a full UUID (' + matched.songUuid.slice(0, 8) + '…). Reloading /embed/ frame...', 'info');
+            mountTrackIntoIframe(matched, true);
+            return;
+          }
+          resolveShortLinkTrack(matched, true);
         });
 
         document.getElementById('btnReloadCurrent').addEventListener('click', function () {
