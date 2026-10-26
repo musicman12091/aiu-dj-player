@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>AI: Underground — DJ Deck v2.0</title>
+  <title>AI: Underground — DJ Deck v2.1</title>
   <script src="https://cdn.tailwindcss.com/3.4.17" async></script>
   <style>
     body {
@@ -38,7 +38,7 @@
         </span>
         <h1 class="text-sm font-bold text-white truncate">DJ Deck</h1>
         <span class="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
-          v2.0
+          v2.1
         </span>
       </div>
       <div class="flex items-center gap-1.5 min-w-0">
@@ -139,11 +139,16 @@
       </div>
 
       <!-- Contextual Sub-Toolbar for Failed Tab -->
-      <div id="failedToolbar" class="hidden flex items-center justify-between gap-2 px-1 py-1 border-b border-slate-800">
-        <span class="text-[11px] text-rose-300 font-medium">Tracks that failed resolution or playback</span>
-        <button id="btnRetryAllFailed" type="button" class="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition">
-          ↻ Retry All Failed
-        </button>
+      <div id="failedToolbar" class="hidden flex flex-col gap-1.5 px-1 pb-2 border-b border-slate-800">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-[11px] text-rose-300 font-medium">Links that failed lookup or playback</span>
+          <button id="btnRetryAllFailed" type="button" class="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition">
+            ↻ Retry All Failed
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-400 leading-snug">
+          Manual fix: tap <strong class="text-slate-200">Open ↗</strong>, copy the <span class="font-mono text-slate-300">suno.com/song/…</span> address, paste it above. If it jumps to the Suno app, long-press Open ↗ → Open in new tab.
+        </p>
       </div>
 
       <!-- Dynamic List Container -->
@@ -157,6 +162,12 @@
   <script>
     (function () {
       const STORAGE_KEY = 'aiu_a57_dj_deck_v2';
+      const CACHE_KEY = 'aiu_resolve_cache_v1';
+      const DEFAULT_ARTIST = '@SunoArtist';
+      const DEMO_IDS = ['trk_song_a', 'trk_song_b', 'trk_incoming_demo'];
+      const UUID_SRC = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+      const LOOKUP_TIMEOUT_MS = 8000;
+      const RETRY_COOLDOWN_MS = 20000;
 
       let state = {
         activeTab: 'incoming',
@@ -165,24 +176,57 @@
         tracks: []
       };
 
+      let resolveCache = {};
+      let lookupChain = Promise.resolve();
+      const pendingResolves = {};
+      let transportBusy = false;
+
+      function isShortId(id) {
+        return String(id || '').indexOf('short-') === 0;
+      }
+
+      function isDemoTrack(t) {
+        const id = String((t && t.id) || '');
+        return DEMO_IDS.indexOf(id) !== -1 || id.indexOf('trk_song_c_') === 0;
+      }
+
+      function placeholderTitle(songUuid) {
+        return isShortId(songUuid)
+          ? 'Suno link · ' + String(songUuid).slice(6)
+          : 'Suno track · ' + String(songUuid).slice(0, 8);
+      }
+
+      // ---------- Storage ----------
+
       function loadState() {
         try {
-          const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('aiu_a57_dj_spike_state_v1');
+          const raw = localStorage.getItem(STORAGE_KEY);
           if (raw) {
             const parsed = JSON.parse(raw);
             if (parsed && Array.isArray(parsed.tracks)) {
-              // Keep only incoming, queued, or failed items (strip old demo clutter if user had demo tracks)
               state.tracks = parsed.tracks.filter(function (t) {
-                return t && (t.status === 'incoming' || t.status === 'queued' || t.status === 'failed');
+                return t && !isDemoTrack(t) && (t.status === 'incoming' || t.status === 'queued' || t.status === 'failed');
+              });
+              state.tracks.forEach(function (t) {
+                t.resolving = false;
+                if (!t.titled && /^Fetching Suno Track/.test(String(t.title || ''))) {
+                  t.title = placeholderTitle(t.songUuid);
+                }
               });
               state.activeTab = (parsed.activeTab === 'queued' || parsed.activeTab === 'incoming' || parsed.activeTab === 'failed')
                 ? parsed.activeTab
                 : 'incoming';
-              state.nowPlaying = parsed.nowPlaying || null;
+              const np = parsed.nowPlaying;
+              state.nowPlaying = (np && !isShortId(np.songUuid) && !isDemoTrack(np)) ? np : null;
             }
           }
         } catch (err) {
           // Ignore sandbox storage errors
+        }
+        try {
+          resolveCache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}') || {};
+        } catch (err) {
+          resolveCache = {};
         }
       }
 
@@ -200,6 +244,16 @@
           // Ignore sandbox storage errors
         }
       }
+
+      function saveCache() {
+        try {
+          localStorage.setItem(CACHE_KEY, JSON.stringify(resolveCache));
+        } catch (err) {
+          // Ignore sandbox storage errors
+        }
+      }
+
+      // ---------- UI helpers ----------
 
       function setStatus(msg, tone) {
         const statusText = document.getElementById('statusText');
@@ -224,6 +278,8 @@
           .replace(/"/g, '&quot;');
       }
 
+      // ---------- Link parsing ----------
+
       // Extract Suno UUIDs or suno.com/s/ short links from any pasted string
       function parseAllSunoSubmissions(input) {
         if (!input) return [];
@@ -231,7 +287,7 @@
         const found = [];
         const seen = {};
 
-        const uuidGlobal = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/g;
+        const uuidGlobal = new RegExp('(' + UUID_SRC + ')', 'g');
         let m;
         while ((m = uuidGlobal.exec(text)) !== null) {
           const uuid = m[1].toLowerCase();
@@ -261,105 +317,231 @@
         return found;
       }
 
-      // Fetch title & canonical UUID from Suno / public metadata endpoints
-      async function fetchTrackMetadata(track, remountIfActive) {
-        if (!track) return false;
-        const lookupUrl = track.originalUrl || ('https://suno.com/song/' + track.songUuid);
-        track.resolving = true;
-        renderQueue();
-        setStatus('Fetching Suno metadata...', 'warn');
-
-        const resolvers = [
-          'https://api.microlink.io/?url=' + encodeURIComponent(lookupUrl),
-          'https://api.allorigins.win/get?url=' + encodeURIComponent(lookupUrl),
-          'https://corsproxy.io/?' + encodeURIComponent(lookupUrl)
+      // Find the song's own ID in a lookup response. Prefers the page's own
+      // og:url / canonical tag over any other song link on the page.
+      function extractSongUuid(text) {
+        if (!text) return null;
+        const songRe = new RegExp('suno\\.(?:com|ai)\\/(?:song|embed)\\/(' + UUID_SRC + ')', 'i');
+        const tagPatterns = [
+          /<meta[^>]+og:url[^>]*>/i,
+          /<link[^>]+rel=["']canonical["'][^>]*>/i
         ];
-
-        const uuidRegex = /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/;
-
-        for (let i = 0; i < resolvers.length; i++) {
-          try {
-            const resp = await fetch(resolvers[i]);
-            if (!resp.ok) continue;
-            const text = await resp.text();
-            const match = text.match(uuidRegex);
-            if (match) {
-              const realUuid = match[1].toLowerCase();
-              track.songUuid = realUuid;
-              track.originalUrl = 'https://suno.com/song/' + realUuid;
-              track.resolving = false;
-
-              try {
-                const json = JSON.parse(text);
-                if (json && json.data && json.data.title) {
-                  const cleaned = String(json.data.title).replace(/\s*\|\s*Suno.*$/i, '').trim();
-                  if (cleaned) track.title = cleaned;
-                }
-                if (json && json.data && json.data.author && (!track.artist || track.artist === '@SunoArtist')) {
-                  track.artist = String(json.data.author).trim();
-                }
-              } catch (ignore) {}
-
-              if (track.title.indexOf('Fetching') === 0 || track.title.indexOf('Short-Link') === 0) {
-                const ogTitleMatch = text.match(/property=["']og:title["']\s+content=["']([^"']+)["']/i);
-                if (ogTitleMatch && ogTitleMatch[1]) {
-                  track.title = ogTitleMatch[1].replace(/\s*\|\s*Suno.*$/i, '').trim();
-                } else {
-                  track.title = 'Suno Track (' + realUuid.slice(0, 8) + ')';
-                }
-              }
-
-              if (track.status === 'failed') {
-                track.status = 'incoming';
-              }
-
-              saveState();
-              renderQueue();
-              setStatus('Ready: ' + track.title, 'info');
-
-              if (remountIfActive || (state.nowPlaying && state.nowPlaying.id === track.id)) {
-                mountTrackIntoIframe(track, true);
-              }
-              return true;
-            }
-          } catch (err) {
-            // Try next resolver
+        for (let i = 0; i < tagPatterns.length; i++) {
+          const tag = text.match(tagPatterns[i]);
+          if (tag) {
+            const m = tag[0].match(songRe);
+            if (m) return m[1].toLowerCase();
           }
         }
-
-        track.resolving = false;
-        if (String(track.songUuid || '').startsWith('short-')) {
-          track.status = 'failed';
-          state.activeTab = 'failed';
-          setStatus('Fetch failed — moved to Failed tab for Retry', 'error');
-        } else {
-          setStatus('Added track (' + track.songUuid.slice(0, 8) + ')', 'info');
-        }
-        saveState();
-        renderQueue();
-        return false;
+        const anySong = text.match(songRe);
+        if (anySong) return anySong[1].toLowerCase();
+        const audio = text.match(new RegExp('cdn\\d*\\.suno\\.ai\\/(' + UUID_SRC + ')\\.mp3', 'i'));
+        if (audio) return audio[1].toLowerCase();
+        return null;
       }
 
-      // Mount track into persistent top iframe ONLY on explicit play/next commands
+      function decodeEntities(s) {
+        return String(s || '')
+          .replace(/&amp;/g, '&')
+          .replace(/&quot;/g, '"')
+          .replace(/&#x27;|&#39;/g, "'")
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>');
+      }
+
+      function cleanTitle(s) {
+        const t = decodeEntities(s).replace(/\s*\|\s*Suno.*$/i, '').trim();
+        if (!t || /^suno(\s*[|\-–—:]|\s*$)/i.test(t)) return '';
+        return t;
+      }
+
+      function extractTitle(text) {
+        if (!text) return '';
+        const m =
+          text.match(/<meta[^>]+property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
+          text.match(/<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:title["']/i) ||
+          text.match(/<title>([^<]+)<\/title>/i);
+        return m ? m[1] : '';
+      }
+
+      // ---------- Lookups (one at a time, with timeouts) ----------
+
+      function fetchWithTimeout(url) {
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timer = setTimeout(function () {
+          if (ctrl) ctrl.abort();
+        }, LOOKUP_TIMEOUT_MS);
+        return fetch(url, ctrl ? { signal: ctrl.signal } : {}).finally(function () {
+          clearTimeout(timer);
+        });
+      }
+
+      async function runLookup(lookupUrl, needUuid) {
+        const enc = encodeURIComponent(lookupUrl);
+        const endpoints = [
+          'https://api.microlink.io/?url=' + enc,
+          'https://api.allorigins.win/get?url=' + enc,
+          'https://corsproxy.io/?url=' + enc
+        ];
+
+        for (let i = 0; i < endpoints.length; i++) {
+          try {
+            const resp = await fetchWithTimeout(endpoints[i]);
+            if (!resp.ok) continue;
+            let body = await resp.text();
+            let urlHint = '';
+            let title = '';
+            let author = '';
+
+            try {
+              const json = JSON.parse(body);
+              if (json && json.data) {
+                urlHint = json.data.url || '';
+                title = json.data.title || '';
+                author = json.data.author || '';
+              }
+              if (json && typeof json.contents === 'string') {
+                body = json.contents;
+                urlHint = (json.status && json.status.url) || '';
+              }
+            } catch (notJson) {}
+
+            body = body.replace(/\\u002[fF]/g, '/').replace(/\\\//g, '/');
+            const uuid = extractSongUuid(urlHint) || extractSongUuid(body);
+            title = cleanTitle(title) || cleanTitle(extractTitle(body));
+
+            if (needUuid && !uuid) continue;
+            if (!needUuid && !title) continue;
+            return { uuid: uuid, title: title, author: String(author || '').trim() };
+          } catch (err) {
+            // Timeout or network error: try next service
+          }
+        }
+        return null;
+      }
+
+      function queueLookup(lookupUrl, needUuid) {
+        const job = lookupChain.then(function () {
+          return runLookup(lookupUrl, needUuid);
+        });
+        lookupChain = job.catch(function () {});
+        return job;
+      }
+
+      // ---------- Resolution ----------
+
+      function applyResolved(track, res) {
+        if (res.uuid) {
+          track.songUuid = res.uuid;
+          track.originalUrl = 'https://suno.com/song/' + res.uuid;
+        }
+        if (res.title) {
+          track.title = res.title;
+          track.titled = true;
+        } else if (!track.titled) {
+          track.title = placeholderTitle(track.songUuid);
+        }
+        if (res.author && (!track.artist || track.artist === DEFAULT_ARTIST)) {
+          track.artist = res.author;
+        }
+      }
+
+      // Short link -> real song ID. Returns true when the track is playable.
+      function resolveShortTrack(track) {
+        if (!track || !isShortId(track.songUuid)) return Promise.resolve(true);
+        if (pendingResolves[track.id]) return pendingResolves[track.id];
+
+        const code = track.songUuid.slice(6);
+        const cached = resolveCache['s:' + code];
+        if (cached && cached.uuid) {
+          applyResolved(track, cached);
+          saveState();
+          renderQueue();
+          return Promise.resolve(true);
+        }
+
+        track.resolving = true;
+        track.lastAttempt = Date.now();
+        track.attempts = (track.attempts || 0) + 1;
+        renderQueue();
+        setStatus('Looking up ' + track.title + '…', 'warn');
+
+        const job = queueLookup(track.originalUrl, true).then(function (res) {
+          track.resolving = false;
+          delete pendingResolves[track.id];
+          if (res && res.uuid) {
+            resolveCache['s:' + code] = res;
+            saveCache();
+            applyResolved(track, res);
+            saveState();
+            renderQueue();
+            return true;
+          }
+          saveState();
+          renderQueue();
+          return false;
+        });
+        pendingResolves[track.id] = job;
+        return job;
+      }
+
+      // Full song link: only fetch the title. Never changes the song ID.
+      function fetchTitle(track) {
+        if (!track || isShortId(track.songUuid) || track.titled) return;
+        if (pendingResolves[track.id]) return;
+
+        const cached = resolveCache['t:' + track.songUuid];
+        if (cached && cached.title) {
+          applyResolved(track, { title: cached.title, author: cached.author });
+          syncNowPlayingMeta(track);
+          saveState();
+          renderQueue();
+          return;
+        }
+
+        track.resolving = true;
+        renderQueue();
+        const job = queueLookup('https://suno.com/song/' + track.songUuid, false).then(function (res) {
+          track.resolving = false;
+          delete pendingResolves[track.id];
+          if (res && res.title) {
+            resolveCache['t:' + track.songUuid] = { title: res.title, author: res.author };
+            saveCache();
+            applyResolved(track, { title: res.title, author: res.author });
+          }
+          syncNowPlayingMeta(track);
+          saveState();
+          renderQueue();
+          return true;
+        });
+        pendingResolves[track.id] = job;
+      }
+
+      function syncNowPlayingMeta(track) {
+        if (state.nowPlaying && state.nowPlaying.id === track.id) {
+          state.nowPlaying.title = track.title;
+          state.nowPlaying.artist = track.artist;
+          renderNowPlayingMeta();
+        }
+      }
+
+      // ---------- Player ----------
+
+      // Mount track into persistent top iframe ONLY on explicit play/next commands.
+      // Only ever called with a real song ID.
       function mountTrackIntoIframe(track, forceReload) {
-        if (!track) return;
+        if (!track || isShortId(track.songUuid)) return;
         const iframe = document.getElementById('sunoEmbedFrame');
         const placeholder = document.getElementById('iframePlaceholder');
-        const isShortLink = String(track.songUuid || '').startsWith('short-');
 
         if (placeholder) {
           placeholder.classList.add('hidden');
         }
 
-        if (isShortLink) {
-          setStatus('Resolving short link before loading player...', 'warn');
-          fetchTrackMetadata(track, true);
-        } else {
-          const embedUrl = 'https://suno.com/embed/' + track.songUuid;
-          if (forceReload || state.lastMountedUuid !== track.songUuid) {
-            iframe.src = embedUrl;
-            state.lastMountedUuid = track.songUuid;
-          }
+        const embedUrl = 'https://suno.com/embed/' + track.songUuid;
+        if (forceReload || state.lastMountedUuid !== track.songUuid) {
+          iframe.src = embedUrl;
+          state.lastMountedUuid = track.songUuid;
         }
 
         state.nowPlaying = {
@@ -386,9 +568,80 @@
         }
 
         titleEl.textContent = state.nowPlaying.title;
-        artistEl.textContent = state.nowPlaying.artist || '@SunoArtist';
+        artistEl.textContent = state.nowPlaying.artist || DEFAULT_ARTIST;
         linkEl.href = state.nowPlaying.originalUrl || ('https://suno.com/song/' + state.nowPlaying.songUuid);
       }
+
+      // Resolve first, then swap. If the link can't be resolved, the current
+      // song, its label, and the queue stay exactly as they were.
+      async function playTrack(track) {
+        if (isShortId(track.songUuid)) {
+          setStatus('Resolving "' + track.title + '" before playing…', 'warn');
+          const ok = await resolveShortTrack(track);
+          if (state.tracks.indexOf(track) === -1) return false;
+          if (!ok) {
+            track.status = 'failed';
+            saveState();
+            renderQueue();
+            setStatus('Could not resolve "' + track.title + '" — moved to Failed', 'error');
+            return false;
+          }
+        }
+
+        if (state.nowPlaying) {
+          const prevIdx = state.tracks.findIndex(function (t) {
+            return t.id === state.nowPlaying.id;
+          });
+          if (prevIdx !== -1 && state.tracks[prevIdx] !== track && state.tracks[prevIdx].status === 'playing') {
+            state.tracks.splice(prevIdx, 1);
+          }
+        }
+
+        track.status = 'playing';
+        mountTrackIntoIframe(track, false);
+        saveState();
+        renderQueue();
+        setStatus('Playing: ' + track.title, 'info');
+        if (!track.titled) fetchTitle(track);
+        return true;
+      }
+
+      function runTransport(fn) {
+        if (transportBusy) {
+          setStatus('Still loading the last request…', 'warn');
+          return;
+        }
+        transportBusy = true;
+        Promise.resolve()
+          .then(fn)
+          .catch(function () {})
+          .then(function () {
+            transportBusy = false;
+          });
+      }
+
+      // Play the first playable song in Playlist, skipping links that fail.
+      async function advanceToNextQueued() {
+        let next;
+        let skipped = 0;
+        while ((next = state.tracks.find(function (t) { return t.status === 'queued'; }))) {
+          const ok = await playTrack(next);
+          if (ok) {
+            if (skipped) setStatus('Playing: ' + next.title + ' (skipped ' + skipped + ' failed)', 'warn');
+            return;
+          }
+          skipped += 1;
+        }
+        if (state.nowPlaying) {
+          setStatus(skipped ? 'No playable links left — current song keeps playing' : 'Playlist is empty — current song keeps playing', 'warn');
+        } else {
+          setStatus('Playlist is empty — approve a track from Pending first', 'warn');
+          state.activeTab = 'incoming';
+          renderQueue();
+        }
+      }
+
+      // ---------- Queue rendering ----------
 
       function renderQueue() {
         const counts = {
@@ -416,7 +669,7 @@
           }
         }
 
-        // Highlight active tab
+        // Highlight active tab; tint Failed red whenever it has items
         document.querySelectorAll('.queue-tab').forEach(function (btn) {
           const tab = btn.getAttribute('data-tab');
           if (tab === state.activeTab) {
@@ -428,7 +681,8 @@
                 : 'bg-rose-500/20 text-rose-300 border-rose-500/50';
             btn.className = 'queue-tab flex items-center justify-between px-2.5 py-2 rounded-xl text-xs font-bold border transition ' + activeColor;
           } else {
-            btn.className = 'queue-tab flex items-center justify-between px-2.5 py-2 rounded-xl text-xs font-semibold bg-slate-950 text-slate-400 border border-slate-800 hover:border-slate-700 transition';
+            const idleText = tab === 'failed' && counts.failed > 0 ? 'text-rose-300' : 'text-slate-400';
+            btn.className = 'queue-tab flex items-center justify-between px-2.5 py-2 rounded-xl text-xs font-semibold bg-slate-950 border border-slate-800 hover:border-slate-700 transition ' + idleText;
           }
         });
 
@@ -458,10 +712,10 @@
 
           const badge =
             track.status === 'queued'
-              ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">#' + (idx + 1) + '</span>'
+              ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">' + (track.resolving ? 'LOOKUP…' : '#' + (idx + 1)) + '</span>'
               : track.status === 'incoming'
               ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-500/15 text-sky-300 border border-sky-500/30">' + (track.resolving ? 'FETCHING…' : 'PENDING') + '</span>'
-              : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">FAILED</span>';
+              : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">' + (track.resolving ? 'RETRYING…' : 'FAILED') + '</span>';
 
           const topRow =
             '<div class="flex items-center justify-between gap-2 min-w-0">' +
@@ -490,11 +744,15 @@
               '</div>' +
               '<button type="button" data-action="remove" data-id="' + track.id + '" class="py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 text-xs font-bold border border-slate-800">✕</button>';
           } else {
-            // Failed tab
+            // Failed tab: unresolved short links get Open ↗ for the manual fix;
+            // real song IDs (marked failed during playback) can go straight back to the queue.
+            const secondary = isShortId(track.songUuid)
+              ? '<a href="' + escapeHtml(track.originalUrl) + '" target="_blank" rel="noopener noreferrer" class="py-2 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700">Open ↗</a>'
+              : '<button type="button" data-action="add-queue" data-id="' + track.id + '" class="py-2 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700">To Queue</button>';
             actionsRow +=
               '<div class="flex items-center gap-1.5 flex-1">' +
-                '<button type="button" data-action="retry-failed" data-id="' + track.id + '" class="flex-1 py-2 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition">↻ Retry Failed</button>' +
-                '<button type="button" data-action="add-queue" data-id="' + track.id + '" class="py-2 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700">To Queue</button>' +
+                '<button type="button" data-action="retry-failed" data-id="' + track.id + '" class="flex-1 py-2 px-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition">↻ Retry</button>' +
+                secondary +
               '</div>' +
               '<button type="button" data-action="remove" data-id="' + track.id + '" class="py-2 px-2.5 rounded-lg bg-slate-900 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 text-xs font-bold border border-slate-800">✕</button>';
           }
@@ -505,37 +763,34 @@
         });
       }
 
-      // Advance to the #1 song in Playlist ('queued')
-      function advanceToNextQueued() {
-        const nextIdx = state.tracks.findIndex(function (t) {
-          return t.status === 'queued';
-        });
-        if (nextIdx === -1) {
-          setStatus('Playlist is empty — approve a track from Pending first', 'warn');
-          state.activeTab = 'incoming';
+      // ---------- Actions ----------
+
+      // Retry a failed link. Short links are looked up again (with a cooldown so
+      // repeated taps don't burn the free lookup services); real song IDs go back to Pending.
+      function retryTrack(track) {
+        if (track.resolving) return Promise.resolve(false);
+        if (track.lastAttempt && Date.now() - track.lastAttempt < RETRY_COOLDOWN_MS) {
+          setStatus('Wait ~20 seconds before retrying that link', 'warn');
+          return Promise.resolve(false);
+        }
+        if (!isShortId(track.songUuid)) {
+          track.status = 'incoming';
+          saveState();
           renderQueue();
-          return;
+          setStatus('Moved "' + track.title + '" back to Pending', 'info');
+          return Promise.resolve(true);
         }
-
-        if (state.nowPlaying) {
-          const prevIdx = state.tracks.findIndex(function (t) {
-            return t.id === state.nowPlaying.id;
-          });
-          if (prevIdx !== -1 && state.tracks[prevIdx].status === 'playing') {
-            state.tracks.splice(prevIdx, 1);
+        return resolveShortTrack(track).then(function (ok) {
+          if (ok && track.status === 'failed') {
+            track.status = 'incoming';
+            setStatus('Resolved: ' + track.title + ' — back in Pending', 'info');
+          } else if (!ok) {
+            setStatus('Still failing — use Open ↗ and paste the full link', 'error');
           }
-        }
-
-        const nextTrack = state.tracks.find(function (t) {
-          return t.status === 'queued';
+          saveState();
+          renderQueue();
+          return ok;
         });
-        if (!nextTrack) return;
-
-        nextTrack.status = 'playing';
-        mountTrackIntoIframe(nextTrack, false);
-        saveState();
-        renderQueue();
-        setStatus('Playing: ' + nextTrack.title, 'info');
       }
 
       function handleQueueAction(action, trackId) {
@@ -585,22 +840,11 @@
           renderQueue();
           setStatus('Updated Playlist order', 'info');
         } else if (action === 'play-now') {
-          if (state.nowPlaying) {
-            const prevIdx = state.tracks.findIndex(function (t) {
-              return t.id === state.nowPlaying.id;
-            });
-            if (prevIdx !== -1 && state.tracks[prevIdx].status === 'playing') {
-              state.tracks.splice(prevIdx, 1);
-            }
-          }
-          track.status = 'playing';
-          mountTrackIntoIframe(track, false);
-          saveState();
-          renderQueue();
-          setStatus('Playing: ' + track.title, 'info');
+          runTransport(function () {
+            return playTrack(track);
+          });
         } else if (action === 'retry-failed') {
-          setStatus('Retrying "' + track.title + '"...', 'warn');
-          fetchTrackMetadata(track, false);
+          retryTrack(track);
         } else if (action === 'remove') {
           state.tracks.splice(index, 1);
           saveState();
@@ -609,7 +853,7 @@
         }
       }
 
-      // Fetch and Submit handler -> drops into Pending Approval ('incoming') and auto-fetches metadata
+      // Fetch and Submit handler -> drops into Pending Approval ('incoming')
       function handleFetchAndSubmit() {
         const urlInput = document.getElementById('inputSunoUrl');
         const artistInput = document.getElementById('inputArtistName');
@@ -622,26 +866,21 @@
           return;
         }
 
-        const artist = artistInput.value.trim() || '@SunoArtist';
+        const artist = artistInput.value.trim() || DEFAULT_ARTIST;
+        const added = [];
 
         items.forEach(function (parsed, idx) {
-          const uuid = parsed.songUuid;
-          const initialTitle = parsed.kind === 'shortlink'
-            ? ('Fetching Suno Track (' + uuid.replace('short-', '') + ')…')
-            : ('Fetching Suno Track (' + uuid.slice(0, 6) + ')…');
-
           const newTrack = {
             id: 'trk_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).slice(2, 6),
-            songUuid: uuid,
-            title: initialTitle,
+            songUuid: parsed.songUuid,
+            title: placeholderTitle(parsed.songUuid),
             artist: artist,
             originalUrl: parsed.originalUrl,
             status: 'incoming',
-            resolving: true
+            resolving: false
           };
-
           state.tracks.push(newTrack);
-          fetchTrackMetadata(newTrack, false);
+          added.push(newTrack);
         });
 
         state.activeTab = 'incoming';
@@ -649,17 +888,35 @@
         artistInput.value = '';
         saveState();
         renderQueue();
+        setStatus('Added ' + added.length + ' link(s) to Pending', 'info');
+
+        added.forEach(function (t) {
+          if (isShortId(t.songUuid)) {
+            resolveShortTrack(t).then(function (ok) {
+              if (ok) {
+                setStatus('Ready: ' + t.title, 'info');
+              } else if (t.status === 'incoming' || t.status === 'queued') {
+                t.status = 'failed';
+                saveState();
+                renderQueue();
+                setStatus('Could not look up ' + t.originalUrl + ' — see Failed tab', 'error');
+              }
+            });
+          } else {
+            fetchTitle(t);
+          }
+        });
       }
 
       window.addEventListener('DOMContentLoaded', function () {
         loadState();
 
         document.getElementById('btnMountFirstTrack').addEventListener('click', function () {
-          advanceToNextQueued();
+          runTransport(advanceToNextQueued);
         });
 
         document.getElementById('btnAdvanceNext').addEventListener('click', function () {
-          advanceToNextQueued();
+          runTransport(advanceToNextQueued);
         });
 
         document.getElementById('btnReloadCurrent').addEventListener('click', function () {
@@ -688,13 +945,14 @@
               title: state.nowPlaying.title,
               artist: state.nowPlaying.artist,
               originalUrl: state.nowPlaying.originalUrl,
-              status: 'failed'
+              status: 'failed',
+              titled: true
             });
           }
           saveState();
           renderQueue();
           setStatus('Sent "' + state.nowPlaying.title + '" to Failed tab', 'error');
-          advanceToNextQueued();
+          runTransport(advanceToNextQueued);
         });
 
         document.getElementById('btnRetryAllFailed').addEventListener('click', function () {
@@ -702,8 +960,9 @@
             return t.status === 'failed';
           });
           if (failedList.length === 0) return;
+          setStatus('Retrying ' + failedList.length + ' link(s) one at a time…', 'warn');
           failedList.forEach(function (t) {
-            fetchTrackMetadata(t, false);
+            retryTrack(t);
           });
         });
 
@@ -730,7 +989,7 @@
           }
         });
 
-        if (state.nowPlaying && !String(state.nowPlaying.songUuid || '').startsWith('short-')) {
+        if (state.nowPlaying) {
           mountTrackIntoIframe(state.nowPlaying, true);
         } else {
           renderNowPlayingMeta();
