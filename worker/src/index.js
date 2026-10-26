@@ -4,12 +4,17 @@
 // GET  /stream?id=<song id>                             → Suno MP3 relayed with CORS + byte ranges
 // GET  /queue                                           → saved deck state (public read)
 // POST /queue   (header X-AIU-Host-Key)                 → save deck state (≤ 500 tracks)
+// GET  /playlist                                        → slim public view for the guest page
+// POST /submit  { url, name, blurb }                    → guest song request into the inbox
+// GET  /inbox[?since=]  (header X-AIU-Host-Key)         → waiting guest requests (deck pulls these)
+// POST /inbox/ack { ids } (header X-AIU-Host-Key)       → remove requests the deck has taken in
 // GET  /                                                → health / config check
 //
-// Bindings: AIU_QUEUE_KV (KV namespace), AIU_HOST_KEY (secret), STREAM_ENABLED ("true"/"false").
+// Bindings: AIU_QUEUE_KV (KV namespace), AIU_HOST_KEY (secret), STREAM_ENABLED ("true"/"false"),
+// SUBMIT_GAP_SECONDS (optional, default 15: minimum gap between requests from one address).
 // TEST_SUNO_ORIGIN / TEST_CDN_ORIGINS exist only for local tests; never set them in production.
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 const UUID_SRC = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const UUID_FULL = new RegExp('^' + UUID_SRC + '$');
 const SONG_PATH = new RegExp('/(?:song|embed)/(' + UUID_SRC + ')', 'i');
@@ -20,6 +25,13 @@ const MAX_HTML_BYTES = 1500000;
 const RESOLVE_CACHE_MAX = 500;
 const RESOLVE_TTL_MS = 6 * 60 * 60 * 1000;
 const UA = 'AIU-DJ-Worker/' + VERSION + ' (+https://musicman12091.github.io/aiu-dj-player/)';
+const SUB_PREFIX = 'sub:';
+const INBOX_MARK = 'inbox:last';
+const SUB_TTL_SECONDS = 3 * 24 * 60 * 60; // unclaimed requests disappear after 3 days
+const MAX_INBOX = 100;
+const MAX_NAME = 40;
+const MAX_BLURB = 280;
+const MAX_SUBMIT_BYTES = 4000;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -31,6 +43,9 @@ const CORS = {
 
 // Per-isolate memory cache for /resolve (the Cache API is a no-op on workers.dev).
 const resolveMemo = new Map();
+// Per-isolate memory of recent requests by (hashed) address, for the submit cooldown.
+// Kept in memory rather than KV so a request costs one KV write, not two.
+const submitSeen = new Map();
 
 export default {
   async fetch(request, env, ctx) {
@@ -44,12 +59,20 @@ export default {
             ok: true,
             service: 'aiu-dj-worker',
             version: VERSION,
-            endpoints: ['/resolve?url=', '/stream?id=', '/queue'],
+            endpoints: ['/resolve?url=', '/stream?id=', '/queue', '/playlist', '/submit', '/inbox'],
             queueBound: !!env.AIU_QUEUE_KV,
             writesProtected: !!env.AIU_HOST_KEY,
             streamEnabled: streamEnabled(env),
             maxTracks: MAX_TRACKS
           });
+        case '/playlist':
+          if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
+          return await handlePlaylist(env);
+        case '/submit':
+          return await handleSubmit(request, url, env);
+        case '/inbox':
+        case '/inbox/ack':
+          return await handleInbox(request, url, env);
         case '/resolve':
           if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
           return await handleResolve(url, env);
@@ -304,19 +327,26 @@ async function followShortLink(code, env) {
 
 async function handleResolve(url, env) {
   const input = url.searchParams.get('url') || url.searchParams.get('id') || '';
+  const r = await resolveSong(input, env, url.origin);
+  return json(r.body, r.status);
+}
+
+// Shared by /resolve and /submit. Returns { status, body }.
+async function resolveSong(input, env, selfOrigin) {
   const c = classifyInput(input);
-  if (c.error) return json({ ok: false, error: c.error }, 400);
+  if (c.error) return { status: 400, body: { ok: false, error: c.error } };
 
   const memoKey = c.kind + ':' + (c.uuid || c.code);
   const hit = resolveMemo.get(memoKey);
-  if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return json(Object.assign({}, hit.body, { cached: true }));
+  if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return { status: 200, body: Object.assign({}, hit.body, { cached: true }) };
 
   let uuid = c.uuid || null;
   let html = null;
   if (c.kind === 'short') {
     const r = await followShortLink(c.code, env);
     if (!r.uuid) {
-      return json({ ok: false, error: r.upstreamStatus === 403 || r.upstreamStatus === 429 ? 'upstream_blocked' : 'not_found', upstreamStatus: r.upstreamStatus || null }, r.upstreamStatus === 403 || r.upstreamStatus === 429 ? 502 : 404);
+      const blocked = r.upstreamStatus === 403 || r.upstreamStatus === 429;
+      return { status: blocked ? 502 : 404, body: { ok: false, error: blocked ? 'upstream_blocked' : 'not_found', upstreamStatus: r.upstreamStatus || null } };
     }
     uuid = r.uuid;
     html = r.html;
@@ -335,7 +365,7 @@ async function handleResolve(url, env) {
   }
   if (html) meta = parseSongPage(html, uuid);
 
-  const self = url.origin;
+  const self = selfOrigin;
   const body = {
     ok: true,
     songUuid: uuid,
@@ -353,7 +383,7 @@ async function handleResolve(url, env) {
     if (resolveMemo.size >= RESOLVE_CACHE_MAX) resolveMemo.delete(resolveMemo.keys().next().value);
     resolveMemo.set(memoKey, { at: Date.now(), body: body });
   }
-  return json(body);
+  return { status: 200, body: body };
 }
 
 // ---------- /stream ----------
@@ -448,7 +478,8 @@ async function handleQueue(request, env) {
     tracks: data.tracks.map(cleanTrack).filter(Boolean),
     nowPlaying: cleanTrack(data.nowPlaying),
     activeTab: typeof data.activeTab === 'string' ? data.activeTab.slice(0, 20) : 'incoming',
-    deckVersion: typeof data.deckVersion === 'string' ? data.deckVersion.slice(0, 20) : null
+    deckVersion: typeof data.deckVersion === 'string' ? data.deckVersion.slice(0, 20) : null,
+    submissionsOpen: data.submissionsOpen !== false
   };
   const updatedAt = Date.now();
   try {
@@ -457,4 +488,185 @@ async function handleQueue(request, env) {
     return json({ ok: false, error: 'kv_write_failed', detail: String((err && err.message) || err).slice(0, 200) }, 503);
   }
   return json({ ok: true, updatedAt: updatedAt, tracks: clean.tracks.length });
+}
+
+// ---------- guest requests ----------
+
+// Returns a Response when the caller isn't the host, otherwise null.
+async function hostCheck(request, env) {
+  if (!env.AIU_HOST_KEY) return json({ ok: false, error: 'host_key_not_configured' }, 503);
+  if (!(await keysMatch(request.headers.get('X-AIU-Host-Key'), env.AIU_HOST_KEY))) {
+    return json({ ok: false, error: 'unauthorized' }, 401);
+  }
+  return null;
+}
+
+// Plain one-line text: no control characters or direction-override tricks, collapsed spaces,
+// cut to `max` characters without splitting emoji.
+function cleanText(s, max) {
+  const chars = Array.from(String(s || '')).map((ch) => {
+    const c = ch.codePointAt(0);
+    const bad = c < 32 || c === 127 || (c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+    return bad ? ' ' : ch;
+  });
+  return Array.from(chars.join('').replace(/\s+/g, ' ').trim()).slice(0, max).join('').trim();
+}
+
+async function addressTag(request, env) {
+  const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown';
+  const data = new TextEncoder().encode('aiu:' + ip + ':' + (env.AIU_HOST_KEY || ''));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+  return Array.from(digest.slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function submitGapMs(env) {
+  const s = Number(env.SUBMIT_GAP_SECONDS);
+  return (s >= 0 && s <= 3600 ? s : 15) * 1000;
+}
+
+function randomTag(n) {
+  const bytes = crypto.getRandomValues(new Uint8Array(n));
+  return Array.from(bytes, (b) => (b % 36).toString(36)).join('');
+}
+
+async function readQueue(env) {
+  const stored = await env.AIU_QUEUE_KV.get(QUEUE_KEY, 'json');
+  return stored && stored.data ? stored : null;
+}
+
+// GET /playlist — what guests see: now playing, up next, recent, how many are waiting.
+async function handlePlaylist(env) {
+  if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
+  const stored = await readQueue(env);
+  const d = stored ? stored.data : null;
+  const tracks = d && Array.isArray(d.tracks) ? d.tracks : [];
+  const pick = (t) => ({
+    songUuid: t.songUuid,
+    title: t.title || null,
+    artist: t.artist && t.artist !== '@SunoArtist' ? t.artist : null,
+    durationSeconds: typeof t.durationSeconds === 'number' ? t.durationSeconds : null,
+    coverUrl: typeof t.coverUrl === 'string' ? t.coverUrl : null,
+    submittedBy: t.submittedBy || null,
+    blurb: t.blurb || null,
+    startedAt: typeof t.startedAt === 'number' ? t.startedAt : null
+  });
+  let nowPlaying = null;
+  if (d && d.nowPlaying) {
+    const rec = tracks.find((t) => t.id === d.nowPlaying.id) || {};
+    nowPlaying = pick(Object.assign({}, d.nowPlaying, { submittedBy: rec.submittedBy, blurb: rec.blurb, coverUrl: d.nowPlaying.coverUrl || rec.coverUrl }));
+  }
+  const played = tracks.filter((t) => t.status === 'played').sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  return json({
+    ok: true,
+    updatedAt: stored ? stored.updatedAt : 0,
+    submissionsOpen: !d || d.submissionsOpen !== false,
+    nowPlaying: nowPlaying,
+    upNext: tracks.filter((t) => t.status === 'queued').slice(0, 100).map(pick),
+    recent: played.slice(0, 10).map(pick),
+    pendingCount: tracks.filter((t) => t.status === 'incoming').length,
+    pendingSongs: tracks.filter((t) => t.status === 'incoming').map((t) => t.songUuid),
+    playedSongs: played.map((t) => t.songUuid)
+  });
+}
+
+// POST /submit — a guest request. One KV write per accepted request (plus a tiny "new mail" marker).
+async function handleSubmit(request, url, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+  if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
+  const text = await request.text();
+  if (text.length > MAX_SUBMIT_BYTES) return json({ ok: false, error: 'too_large' }, 413);
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch (err) {
+    return json({ ok: false, error: 'invalid_json' }, 400);
+  }
+  if (!body || typeof body !== 'object') return json({ ok: false, error: 'invalid_json' }, 400);
+  const name = cleanText(body.name, MAX_NAME);
+  const blurb = cleanText(body.blurb, MAX_BLURB);
+  if (!name) return json({ ok: false, error: 'missing_name' }, 400);
+
+  const stored = await readQueue(env);
+  const q = stored ? stored.data : null;
+  if (q && q.submissionsOpen === false) return json({ ok: false, error: 'submissions_closed' }, 403);
+
+  const tag = await addressTag(request, env);
+  const now = Date.now();
+  const gap = submitGapMs(env);
+  const last = submitSeen.get(tag);
+  if (last && now - last < gap) {
+    return json({ ok: false, error: 'slow_down', retryAfter: Math.ceil((gap - (now - last)) / 1000) }, 429);
+  }
+
+  const r = await resolveSong(body.url, env, url.origin);
+  if (!r.body.ok) return json(r.body, r.status);
+  const song = r.body;
+
+  const tracks = q && Array.isArray(q.tracks) ? q.tracks : [];
+  const active = tracks.find((t) => t.songUuid === song.songUuid && (t.status === 'incoming' || t.status === 'queued' || t.status === 'playing'));
+  const playingNow = q && q.nowPlaying && q.nowPlaying.songUuid === song.songUuid;
+  if (active || playingNow) {
+    const where = playingNow || (active && active.status === 'playing') ? 'playing' : active.status === 'queued' ? 'queued' : 'pending';
+    return json({ ok: false, error: 'already_in_queue', where: where, title: song.title }, 409);
+  }
+
+  const id = SUB_PREFIX + now.toString(36).padStart(9, '0') + ':' + randomTag(6);
+  const record = {
+    id: id,
+    songUuid: song.songUuid,
+    title: song.title,
+    artist: song.artist,
+    durationSeconds: song.durationSeconds,
+    coverUrl: song.coverUrl,
+    submittedBy: name,
+    blurb: blurb || null,
+    submittedAt: now
+  };
+  try {
+    await env.AIU_QUEUE_KV.put(id, JSON.stringify(record), { expirationTtl: SUB_TTL_SECONDS });
+  } catch (err) {
+    return json({ ok: false, error: 'kv_write_failed' }, 503);
+  }
+  submitSeen.set(tag, now);
+  if (submitSeen.size > 5000) submitSeen.delete(submitSeen.keys().next().value);
+  try {
+    await env.AIU_QUEUE_KV.put(INBOX_MARK, String(now));
+  } catch (err) {
+    // The marker only speeds up the deck's check; the deck also does a full check every few minutes.
+  }
+  return json({ ok: true, id: id, songUuid: song.songUuid, title: song.title, artist: song.artist, durationSeconds: song.durationSeconds });
+}
+
+// GET /inbox (host) — waiting requests. With ?since=<marker> it skips the listing when nothing new
+// has arrived, which keeps the deck's polling inside KV's free daily allowance.
+// POST /inbox/ack (host) — { ids: [...] } removes requests the deck has taken in.
+async function handleInbox(request, url, env) {
+  if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
+  const denied = await hostCheck(request, env);
+  if (denied) return denied;
+
+  if (url.pathname === '/inbox/ack') {
+    if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+    let body;
+    try {
+      body = JSON.parse(await request.text());
+    } catch (err) {
+      return json({ ok: false, error: 'invalid_json' }, 400);
+    }
+    const ids = (body && Array.isArray(body.ids) ? body.ids : [])
+      .filter((k) => typeof k === 'string' && k.indexOf(SUB_PREFIX) === 0 && k.length <= 64)
+      .slice(0, MAX_INBOX);
+    await Promise.all(ids.map((k) => env.AIU_QUEUE_KV.delete(k).catch(() => null)));
+    return json({ ok: true, deleted: ids.length });
+  }
+
+  if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
+  const marker = Number(await env.AIU_QUEUE_KV.get(INBOX_MARK)) || 0;
+  if (url.searchParams.has('since') && marker <= (Number(url.searchParams.get('since')) || 0)) {
+    return json({ ok: true, items: [], marker: marker, skipped: true });
+  }
+  const list = await env.AIU_QUEUE_KV.list({ prefix: SUB_PREFIX, limit: MAX_INBOX });
+  const values = await Promise.all(list.keys.map((k) => env.AIU_QUEUE_KV.get(k.name, 'json').catch(() => null)));
+  const items = values.filter((v) => v && typeof v.id === 'string').sort((a, b) => (a.submittedAt || 0) - (b.submittedAt || 0));
+  return json({ ok: true, items: items, marker: marker, more: !list.list_complete });
 }

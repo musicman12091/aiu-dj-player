@@ -8,6 +8,10 @@ The Cloudflare Worker behind DJ Deck v3.0. One file (`src/index.js`), no depende
 | `GET /stream?id=<song id>` | Relays `cdn1.suno.ai/<id>.mp3` (cdn2 as backup) with `Access-Control-Allow-Origin: *` and byte ranges (206), so the deck's `<audio crossorigin="anonymous">` and visualizer work. Returns 403 `stream_locked` or 404 `stream_unavailable` when Suno refuses, and the deck switches to Suno's embed. |
 | `GET /queue` | The saved queue (anyone can read). |
 | `POST /queue` | Saves the queue (up to 500 songs, 1 MB). Needs header `X-AIU-Host-Key`. |
+| `GET /playlist` | Slim public view for the guest page: now playing, up next, recently played, how many are waiting, open/paused. Notes on songs still waiting for approval aren't included. |
+| `POST /submit` | Guest request `{ url, name, blurb }`. Looks the song up, refuses duplicates and anything while paused, allows one request per address every 15 seconds, and stores it for the deck (kept up to 3 days). |
+| `GET /inbox` | Waiting guest requests. Needs `X-AIU-Host-Key`. `?since=<marker>` answers instantly when nothing new has arrived. |
+| `POST /inbox/ack` | `{ ids }` removes requests the deck has taken in. Needs `X-AIU-Host-Key`. |
 | `GET /health` | Status check. |
 
 ## Settings
@@ -17,6 +21,7 @@ The Cloudflare Worker behind DJ Deck v3.0. One file (`src/index.js`), no depende
 | `AIU_QUEUE_KV` | KV namespace binding | namespace `AIU_QUEUE_KV` (id `d1e4316a4a454f0da817d7cc5efc64a4`) |
 | `AIU_HOST_KEY` | **Secret** | A long random string you make up. The deck needs the same value to save the queue. Never commit it. |
 | `STREAM_ENABLED` | Variable (optional) | `true` (default) or `false` to turn off audio relaying |
+| `SUBMIT_GAP_SECONDS` | Variable (optional) | Seconds between guest requests from one address. Default `15`. |
 
 ## Deploy option A: Cloudflare dashboard (no tools needed)
 
@@ -36,7 +41,7 @@ npx wrangler secret put AIU_HOST_KEY
 
 ## Free-plan limits that matter
 
-- **KV: 1,000 saves a day**, resetting at 00:00 UTC (6 pm Regina). The deck batches edits, so a party uses a small share. Reads are 100,000 a day.
+- **KV: 1,000 saves a day**, resetting at 00:00 UTC (6 pm Regina). The deck batches edits, and each guest request costs one or two, so a party with a few dozen requests uses roughly a quarter to a third. Deletes and listings have their own 1,000-a-day allowances. The deck only lists the inbox when something new arrived, plus once every 5 minutes. Reads are 100,000 a day.
 - **Requests: 100,000 a day.** Each song uses a lookup plus a few audio requests, so this isn't the limit for a party.
 - Lookups are remembered in the Worker's memory for up to 6 hours, which spares Suno repeat requests.
 
