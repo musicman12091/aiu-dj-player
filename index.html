@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>AI: Underground — DJ Deck v2.2</title>
+  <title>AI: Underground — DJ Deck v2.3</title>
   <script src="https://cdn.tailwindcss.com/3.4.17" async></script>
   <style>
     body {
@@ -38,7 +38,7 @@
         </span>
         <h1 class="text-sm font-bold text-white truncate">DJ Deck</h1>
         <span class="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
-          v2.2
+          v2.3
         </span>
       </div>
       <div class="flex items-center gap-1.5 min-w-0">
@@ -339,7 +339,7 @@
 
       // Find the song's own ID in a lookup response. Prefers the page's own
       // og:url / canonical tag over any other song link on the page, then any
-      // /song/ or /embed/ path (absolute or relative), then the audio file, then the cover image.
+      // /song/ or /embed/ path (absolute or relative), then the audio file.
       function extractSongUuid(raw) {
         if (!raw) return null;
         const text = normalizeForIds(raw);
@@ -359,8 +359,7 @@
         if (anySong) return anySong[1].toLowerCase();
         const audio = text.match(new RegExp('cdn\\d*\\.suno\\.ai\\/(' + UUID_SRC + ')\\.mp3', 'i'));
         if (audio) return audio[1].toLowerCase();
-        const cover = text.match(new RegExp('suno\\.ai\\/image_(?:large_)?(' + UUID_SRC + ')', 'i'));
-        if (cover) return cover[1].toLowerCase();
+        // Never use the cover-image ID: Suno reuses artwork, so image_<id> can belong to a different song.
         return null;
       }
 
