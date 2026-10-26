@@ -105,8 +105,8 @@
       <ul id="mineList" class="mt-2 flex flex-col gap-1.5"></ul>
     </section>
 
-    <!-- Playlist -->
-    <section class="rounded-2xl bg-slate-900/95 border border-emerald-500/40 p-3">
+    <!-- Playlist: stays visible when new requests are paused -->
+    <section id="playlistSection" class="rounded-2xl bg-slate-900/95 border border-emerald-500/40 p-3">
       <div class="flex items-baseline justify-between gap-2">
         <p class="text-[10px] uppercase tracking-wider font-bold text-emerald-300">Playlist</p>
         <p id="plCounter" class="text-[11px] font-semibold text-slate-300 text-right">0 songs</p>
@@ -129,7 +129,7 @@
       <p id="pendingNote" class="mt-2 text-[11px] text-sky-300"></p>
     </section>
 
-    <section class="rounded-2xl bg-slate-900/95 border border-slate-800 p-3">
+    <section id="recentSection" class="rounded-2xl bg-slate-900/95 border border-slate-800 p-3">
       <p class="text-[10px] uppercase tracking-wider font-bold text-slate-300">Recently played</p>
       <ol id="recentList" class="mt-2 flex flex-col gap-1.5"></ol>
     </section>
@@ -139,8 +139,8 @@
 
   <script>
     (function () {
-      // Set to the deployed Worker address. Until then, a #worker=<address> link sets it on each device.
-      const DEFAULT_WORKER_URL = '';
+      // Live Worker. A #worker= link still overrides this on a device.
+      const DEFAULT_WORKER_URL = 'https://aiu-dj-worker.musicman12091.workers.dev';
       const LS = {
         worker: 'aiu_worker_url',
         name: 'aiu_guest_name',
@@ -173,6 +173,11 @@
         } catch (err) {
           // storage unavailable: fine for this visit
         }
+      }
+
+      function ensureWorkerDefault() {
+        const cur = lsGet(LS.worker);
+        if (!cur && DEFAULT_WORKER_URL) lsSet(LS.worker, DEFAULT_WORKER_URL);
       }
 
       function base() {
@@ -486,14 +491,18 @@
           if (t.durationSeconds > 0) total += t.durationSeconds;
           else unknown = true;
         });
-        $('plCounter').textContent = upNext.length === 1 ? '1 song' : upNext.length + ' songs';
-        if (upNext.length) $('plCounter').textContent += ' · ' + fmtRuntime(total) + (unknown ? '+' : '');
+        if (!view && base()) $('plCounter').textContent = 'Connecting…';
+        else {
+          $('plCounter').textContent = upNext.length === 1 ? '1 song' : upNext.length + ' songs';
+          if (upNext.length) $('plCounter').textContent += ' · ' + fmtRuntime(total) + (unknown ? '+' : '');
+          else if (v.nowPlaying) $('plCounter').textContent = 'Now playing';
+        }
         $('pendingNote').textContent = v.pendingCount ? v.pendingCount + ' waiting for DJ approval' : '';
 
         // Recently played
         const rec = $('recentList');
         rec.innerHTML = '';
-        (v.recent || []).slice(0, 5).forEach(function (t) { rec.appendChild(row(t)); });
+        (v.recent || []).slice(0, 10).forEach(function (t) { rec.appendChild(row(t)); });
         if (!(v.recent || []).length) rec.appendChild(empty('Nothing played yet.'));
 
         // Your requests
@@ -512,9 +521,19 @@
           ml.appendChild(li);
         });
 
+        // Playlist and Recently Played stay on screen when the DJ pauses new requests.
+        const connected = !!base();
+        const sessionLive = !!(view && (view.inboxOpen !== false || view.nowPlaying || (view.upNext && view.upNext.length) || (view.recent && view.recent.length) || view.pendingCount));
+        $('notConnected').classList.toggle('hidden', connected || sessionLive);
+        $('playlistSection').classList.remove('hidden');
+        $('recentSection').classList.remove('hidden');
+        if (connected) {
+          $('submitForm').classList.remove('hidden');
+          $('whoCard').classList.remove('hidden');
+        }
         const closed = view && view.submissionsOpen === false;
         $('closedBanner').classList.toggle('hidden', !closed);
-        $('btnSubmit').disabled = closed || busy;
+        $('btnSubmit').disabled = closed || busy || !connected;
         if (view && view._at) {
           let t = '';
           try {
@@ -659,6 +678,7 @@
 
       window.addEventListener('DOMContentLoaded', function () {
         readFragment();
+        ensureWorkerDefault();
         renderWho();
         $('btnSignIn').addEventListener('click', signIn);
         $('btnSwitch').addEventListener('click', signOut);
@@ -687,6 +707,7 @@
           render();
           return;
         }
+        $('notConnected').classList.add('hidden');
         render();
         refresh();
         setInterval(function () {
