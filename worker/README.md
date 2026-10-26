@@ -1,11 +1,11 @@
 # aiu-dj-worker
 
-The Cloudflare Worker behind DJ Deck v3.4 (worker 3.3.0). One file (`src/index.js`), no dependencies, free plan. Live address: `https://aiu-dj-worker.musicman12091.workers.dev`.
+The Cloudflare Worker behind DJ Deck v3.5 (worker 3.4.0). One file (`src/index.js`), no dependencies, free plan. Live address: `https://aiu-dj-worker.musicman12091.workers.dev`.
 
 | Endpoint | What it does |
 |---|---|
 | `GET /resolve?url=<suno link>` | Follows `suno.com/s/…` redirects, refuses playlist and cover-image links, and returns `{ ok, songUuid, title, artist, originalUrl, embedUrl, audioUrl, audioUrlSource, streamProxyUrl, coverUrl, durationSeconds }`. `audioUrl` is scraped from `suno.com/embed/<id>` (JSON `audio_url` / `media_urls`, or `og:audio`). Titles are decoded (`&#xE9;` → é). Only Suno addresses are accepted, so it can't be used as an open proxy. |
-| `GET /stream?id=<song id>` | Relays a clear audio file (the scraped URL when it is a real container, then `cdn1` / `cdn2`) with `Access-Control-Allow-Origin: *` and byte ranges. Encrypted blobs and 403s are refused so the deck can try the file directly from the listener's browser, then Suno's embed. |
+| `GET /stream?id=<song id>` | Off unless `STREAM_ENABLED` is `true`. While off it returns `stream_disabled` immediately and does not contact `cdn1.suno.ai`. When on, it relays a clear audio file (the scraped URL when it is a real container, then `cdn1` / `cdn2`) with `Access-Control-Allow-Origin: *` and byte ranges. |
 | `GET /queue` | The saved queue (anyone can read). |
 | `POST /queue` | Saves the queue (up to 500 songs, 1 MB). Needs header `X-AIU-Host-Key`. |
 | `GET /playlist` | Slim public view for the guest page: now playing, up next, recently played, how many are waiting, open/paused. `inboxOpen` stays true while a session queue is active so Playlist and Recently Played still show when new requests are paused. Notes on songs still waiting for approval aren't included. |
@@ -23,7 +23,7 @@ The Cloudflare Worker behind DJ Deck v3.4 (worker 3.3.0). One file (`src/index.j
 |---|---|---|
 | `AIU_QUEUE_KV` | KV namespace binding | namespace `AIU_QUEUE_KV` (id `d1e4316a4a454f0da817d7cc5efc64a4`) |
 | `AIU_HOST_KEY` | **Secret** | A long random string you make up. The deck needs the same value to save the queue. Never commit it. |
-| `STREAM_ENABLED` | Variable (optional) | `true` (default) or `false` to turn off audio relaying |
+| `STREAM_ENABLED` | Variable (optional) | `false` (default). `true` turns audio relaying back on. The deck also skips `/stream` and `cdn1.suno.ai` unless its own `STREAM_ENABLED` constant is `true`. |
 | `SUBMIT_GAP_SECONDS` | Variable (optional) | Seconds between guest requests from one address. Default `15`. |
 
 ## Deploy option A: Cloudflare dashboard (no tools needed)
