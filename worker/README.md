@@ -1,6 +1,6 @@
 # aiu-dj-worker
 
-The Cloudflare Worker behind DJ Deck v3.0. One file (`src/index.js`), no dependencies, free plan.
+The Cloudflare Worker behind DJ Deck v3.2. One file (`src/index.js`), no dependencies, free plan.
 
 | Endpoint | What it does |
 |---|---|
@@ -9,9 +9,12 @@ The Cloudflare Worker behind DJ Deck v3.0. One file (`src/index.js`), no depende
 | `GET /queue` | The saved queue (anyone can read). |
 | `POST /queue` | Saves the queue (up to 500 songs, 1 MB). Needs header `X-AIU-Host-Key`. |
 | `GET /playlist` | Slim public view for the guest page: now playing, up next, recently played, how many are waiting, open/paused. Notes on songs still waiting for approval aren't included. |
-| `POST /submit` | Guest request `{ url, name, blurb }`. Looks the song up, refuses duplicates and anything while paused, allows one request per address every 15 seconds, and stores it for the deck (kept up to 3 days). |
-| `GET /inbox` | Waiting guest requests. Needs `X-AIU-Host-Key`. `?since=<marker>` answers instantly when nothing new has arrived. |
-| `POST /inbox/ack` | `{ ids }` removes requests the deck has taken in. Needs `X-AIU-Host-Key`. |
+| `POST /submit` | Guest request `{ url, name, pin, blurb }`. Needs a valid name + PIN (a new name is claimed). Looks the song up, refuses duplicates and anything while paused, allows one request per address every 15 seconds, and stores it for the deck (kept up to 3 days). |
+| `GET /inbox` | Waiting guest requests, plus `withdrawn` (songs guests took back). Needs `X-AIU-Host-Key`. `?since=<marker>` answers instantly when nothing new has arrived. |
+| `POST /login` | `{ name, pin }` checks a guest's name + 4-digit PIN. The first PIN used with a name claims it. PINs are stored as salted SHA-256 hashes. 5 wrong in a row lock the name for 15 minutes (`locked`, `retryAfter`); otherwise `wrong_pin` with `triesLeft`. |
+| `POST /unsubmit` | `{ name, pin, songUuid, subId }` takes back the guest's own song while it's waiting or in the playlist. Refuses `not_yours`, `already_playing`, `already_played`. The deck removes it at its next inbox check; `/playlist` hides it straight away. |
+| `POST /inbox/ack` | `{ ids, withdrawn }` removes requests the deck has taken in and take-backs it has applied. Needs `X-AIU-Host-Key`. |
+| `POST /account/reset` | `{ name }` forgets a guest's PIN so their next one claims the name again. Needs `X-AIU-Host-Key`. |
 | `GET /health` | Status check. |
 
 ## Settings

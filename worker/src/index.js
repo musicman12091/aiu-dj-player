@@ -5,16 +5,19 @@
 // GET  /queue                                           → saved deck state (public read)
 // POST /queue   (header X-AIU-Host-Key)                 → save deck state (≤ 500 tracks)
 // GET  /playlist                                        → slim public view for the guest page
-// POST /submit  { url, name, blurb }                    → guest song request into the inbox
-// GET  /inbox[?since=]  (header X-AIU-Host-Key)         → waiting guest requests (deck pulls these)
-// POST /inbox/ack { ids } (header X-AIU-Host-Key)       → remove requests the deck has taken in
+// POST /login   { name, pin }                          → check a guest name + 4-digit PIN (first use claims the name)
+// POST /submit  { url, name, pin, blurb }               → guest song request into the inbox
+// POST /unsubmit { name, pin, songUuid, subId }         → guest takes back their own song (until it plays)
+// GET  /inbox[?since=]  (header X-AIU-Host-Key)         → waiting guest requests + take-backs (deck pulls these)
+// POST /inbox/ack { ids, withdrawn } (header X-AIU-Host-Key) → remove requests/take-backs the deck has handled
+// POST /account/reset { name } (header X-AIU-Host-Key)  → forget a guest's PIN so they can pick a new one
 // GET  /                                                → health / config check
 //
 // Bindings: AIU_QUEUE_KV (KV namespace), AIU_HOST_KEY (secret), STREAM_ENABLED ("true"/"false"),
 // SUBMIT_GAP_SECONDS (optional, default 15: minimum gap between requests from one address).
 // TEST_SUNO_ORIGIN / TEST_CDN_ORIGINS exist only for local tests; never set them in production.
 
-const VERSION = '3.1.0';
+const VERSION = '3.2.0';
 const UUID_SRC = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const UUID_FULL = new RegExp('^' + UUID_SRC + '$');
 const SONG_PATH = new RegExp('/(?:song|embed)/(' + UUID_SRC + ')', 'i');
@@ -32,6 +35,15 @@ const MAX_INBOX = 100;
 const MAX_NAME = 40;
 const MAX_BLURB = 280;
 const MAX_SUBMIT_BYTES = 4000;
+const ACCT_PREFIX = 'acct:';
+const PIN_RE = /^[0-9]{4}$/;
+const PIN_MAX_FAILS = 5; // wrong PINs in a row before the name locks
+const PIN_LOCK_MS = 15 * 60 * 1000; // how long a locked name stays locked
+const ADDR_TRIES_MAX = 20; // wrong PINs + new names from one address per window
+const ADDR_WINDOW_MS = 10 * 60 * 1000;
+const WITHDRAWN_KEY = 'withdrawn:v1';
+const MAX_WITHDRAWN = 200;
+const WITHDRAWN_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -46,6 +58,8 @@ const resolveMemo = new Map();
 // Per-isolate memory of recent requests by (hashed) address, for the submit cooldown.
 // Kept in memory rather than KV so a request costs one KV write, not two.
 const submitSeen = new Map();
+// Per-isolate count of wrong PINs and new names by (hashed) address, on top of the per-name lock.
+const addrTries = new Map();
 
 export default {
   async fetch(request, env, ctx) {
@@ -59,7 +73,7 @@ export default {
             ok: true,
             service: 'aiu-dj-worker',
             version: VERSION,
-            endpoints: ['/resolve?url=', '/stream?id=', '/queue', '/playlist', '/submit', '/inbox'],
+            endpoints: ['/resolve?url=', '/stream?id=', '/queue', '/playlist', '/login', '/submit', '/unsubmit', '/inbox', '/account/reset'],
             queueBound: !!env.AIU_QUEUE_KV,
             writesProtected: !!env.AIU_HOST_KEY,
             streamEnabled: streamEnabled(env),
@@ -68,8 +82,14 @@ export default {
         case '/playlist':
           if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
           return await handlePlaylist(env);
+        case '/login':
+          return await handleLogin(request, env);
         case '/submit':
           return await handleSubmit(request, url, env);
+        case '/unsubmit':
+          return await handleUnsubmit(request, env);
+        case '/account/reset':
+          return await handleAccountReset(request, env);
         case '/inbox':
         case '/inbox/ack':
           return await handleInbox(request, url, env);
@@ -539,8 +559,11 @@ async function handlePlaylist(env) {
   if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
   const stored = await readQueue(env);
   const d = stored ? stored.data : null;
-  const tracks = d && Array.isArray(d.tracks) ? d.tracks : [];
+  const withdrawn = await readWithdrawn(env);
+  const tracks = (d && Array.isArray(d.tracks) ? d.tracks : []).filter((t) => !isWithdrawn(t, withdrawn));
   const pick = (t) => ({
+    id: t.id,
+    owner: typeof t.owner === 'string' ? t.owner : null,
     songUuid: t.songUuid,
     title: t.title || null,
     artist: t.artist && t.artist !== '@SunoArtist' ? t.artist : null,
@@ -553,7 +576,7 @@ async function handlePlaylist(env) {
   let nowPlaying = null;
   if (d && d.nowPlaying) {
     const rec = tracks.find((t) => t.id === d.nowPlaying.id) || {};
-    nowPlaying = pick(Object.assign({}, d.nowPlaying, { submittedBy: rec.submittedBy, blurb: rec.blurb, coverUrl: d.nowPlaying.coverUrl || rec.coverUrl }));
+    nowPlaying = pick(Object.assign({}, d.nowPlaying, { owner: rec.owner, submittedBy: rec.submittedBy, blurb: rec.blurb, coverUrl: d.nowPlaying.coverUrl || rec.coverUrl }));
   }
   const played = tracks.filter((t) => t.status === 'played').sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
   return json({
@@ -569,7 +592,8 @@ async function handlePlaylist(env) {
   });
 }
 
-// POST /submit — a guest request. One KV write per accepted request (plus a tiny "new mail" marker).
+// POST /submit — a guest request, signed with the guest's name + PIN.
+// One KV write per accepted request (plus a tiny "new mail" marker; a new name costs one more).
 async function handleSubmit(request, url, env) {
   if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
   if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
@@ -598,11 +622,15 @@ async function handleSubmit(request, url, env) {
     return json({ ok: false, error: 'slow_down', retryAfter: Math.ceil((gap - (now - last)) / 1000) }, 429);
   }
 
+  const acct = await checkAccount(request, env, name, body.pin);
+  if (!acct.ok) return json(acct.body, acct.status);
+
   const r = await resolveSong(body.url, env, url.origin);
   if (!r.body.ok) return json(r.body, r.status);
   const song = r.body;
 
-  const tracks = q && Array.isArray(q.tracks) ? q.tracks : [];
+  const withdrawn = await readWithdrawn(env);
+  const tracks = (q && Array.isArray(q.tracks) ? q.tracks : []).filter((t) => !isWithdrawn(t, withdrawn));
   const active = tracks.find((t) => t.songUuid === song.songUuid && (t.status === 'incoming' || t.status === 'queued' || t.status === 'playing'));
   const playingNow = q && q.nowPlaying && q.nowPlaying.songUuid === song.songUuid;
   if (active || playingNow) {
@@ -618,7 +646,8 @@ async function handleSubmit(request, url, env) {
     artist: song.artist,
     durationSeconds: song.durationSeconds,
     coverUrl: song.coverUrl,
-    submittedBy: name,
+    submittedBy: acct.name,
+    owner: acct.owner,
     blurb: blurb || null,
     submittedAt: now
   };
@@ -634,12 +663,14 @@ async function handleSubmit(request, url, env) {
   } catch (err) {
     // The marker only speeds up the deck's check; the deck also does a full check every few minutes.
   }
-  return json({ ok: true, id: id, songUuid: song.songUuid, title: song.title, artist: song.artist, durationSeconds: song.durationSeconds });
+  return json({ ok: true, id: id, songUuid: song.songUuid, title: song.title, artist: song.artist, durationSeconds: song.durationSeconds, name: acct.name, owner: acct.owner, newName: acct.created });
 }
 
 // GET /inbox (host) — waiting requests. With ?since=<marker> it skips the listing when nothing new
 // has arrived, which keeps the deck's polling inside KV's free daily allowance.
-// POST /inbox/ack (host) — { ids: [...] } removes requests the deck has taken in.
+// POST /inbox/ack (host) — { ids: [...], withdrawn: [...] } removes requests the deck has taken in
+// and take-backs the deck has applied.
+// Every answer also carries `withdrawn`: songs guests took back, for the deck to remove.
 async function handleInbox(request, url, env) {
   if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
   const denied = await hostCheck(request, env);
@@ -657,16 +688,247 @@ async function handleInbox(request, url, env) {
       .filter((k) => typeof k === 'string' && k.indexOf(SUB_PREFIX) === 0 && k.length <= 64)
       .slice(0, MAX_INBOX);
     await Promise.all(ids.map((k) => env.AIU_QUEUE_KV.delete(k).catch(() => null)));
-    return json({ ok: true, deleted: ids.length });
+    const done = (body && Array.isArray(body.withdrawn) ? body.withdrawn : []).filter((k) => typeof k === 'string');
+    let cleared = 0;
+    if (done.length) {
+      const list = await readWithdrawn(env);
+      const keep = list.filter((w) => done.indexOf(w.wid) === -1);
+      cleared = list.length - keep.length;
+      if (cleared) await writeWithdrawn(env, keep).catch(() => null);
+    }
+    return json({ ok: true, deleted: ids.length, cleared: cleared });
   }
 
   if (request.method !== 'GET') return json({ ok: false, error: 'method_not_allowed' }, 405);
   const marker = Number(await env.AIU_QUEUE_KV.get(INBOX_MARK)) || 0;
+  const withdrawn = await readWithdrawn(env);
   if (url.searchParams.has('since') && marker <= (Number(url.searchParams.get('since')) || 0)) {
-    return json({ ok: true, items: [], marker: marker, skipped: true });
+    return json({ ok: true, items: [], withdrawn: withdrawn, marker: marker, skipped: true });
   }
   const list = await env.AIU_QUEUE_KV.list({ prefix: SUB_PREFIX, limit: MAX_INBOX });
   const values = await Promise.all(list.keys.map((k) => env.AIU_QUEUE_KV.get(k.name, 'json').catch(() => null)));
   const items = values.filter((v) => v && typeof v.id === 'string').sort((a, b) => (a.submittedAt || 0) - (b.submittedAt || 0));
-  return json({ ok: true, items: items, marker: marker, more: !list.list_complete });
+  return json({ ok: true, items: items, withdrawn: withdrawn, marker: marker, more: !list.list_complete });
+}
+
+// ---------- guest names + PINs ----------
+//
+// A guest's name is theirs once they've used it with a 4-digit PIN. The PIN is stored only as a
+// salted SHA-256 hash, so nobody (the host included) can read it back. Five wrong PINs in a row lock
+// the name for 15 minutes, which makes trying every PIN take weeks instead of minutes. The host can
+// forget a name's PIN from the deck so the guest can pick a new one.
+
+// The account key for a display name: "@Derek", "derek" and " Derek " are the same person.
+function ownerKey(name) {
+  return cleanText(name, MAX_NAME).replace(/^@+/, '').trim().toLowerCase();
+}
+
+async function pinHash(salt, pin) {
+  const data = new TextEncoder().encode('aiu-pin:v1:' + salt + ':' + pin);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function addrBlocked(tag, now) {
+  const rec = addrTries.get(tag);
+  if (!rec || now - rec.start >= ADDR_WINDOW_MS) return 0;
+  return rec.count >= ADDR_TRIES_MAX ? Math.ceil((ADDR_WINDOW_MS - (now - rec.start)) / 1000) : 0;
+}
+
+function addrBump(tag, now) {
+  const rec = addrTries.get(tag);
+  if (!rec || now - rec.start >= ADDR_WINDOW_MS) addrTries.set(tag, { start: now, count: 1 });
+  else rec.count += 1;
+  if (addrTries.size > 5000) addrTries.delete(addrTries.keys().next().value);
+}
+
+// Checks a name + PIN, claiming the name if nobody has it yet.
+// → { ok: true, owner, name, created } or { ok: false, status, body }
+async function checkAccount(request, env, rawName, rawPin) {
+  const no = (status, body) => ({ ok: false, status: status, body: Object.assign({ ok: false }, body) });
+  const name = cleanText(rawName, MAX_NAME);
+  const owner = ownerKey(name);
+  if (!owner) return no(400, { error: 'missing_name' });
+  const pin = String(rawPin === undefined || rawPin === null ? '' : rawPin).trim();
+  if (!pin) return no(400, { error: 'missing_pin' });
+  if (!PIN_RE.test(pin)) return no(400, { error: 'bad_pin' });
+
+  const now = Date.now();
+  const tag = await addressTag(request, env);
+  const wait = addrBlocked(tag, now);
+  if (wait) return no(429, { error: 'too_many_tries', retryAfter: wait });
+
+  const key = ACCT_PREFIX + owner;
+  const acct = await env.AIU_QUEUE_KV.get(key, 'json');
+  if (!acct || typeof acct.hash !== 'string') {
+    const salt = randomTag(16);
+    const record = { name: name, salt: salt, hash: await pinHash(salt, pin), fails: 0, lockedUntil: 0, createdAt: now };
+    try {
+      await env.AIU_QUEUE_KV.put(key, JSON.stringify(record));
+    } catch (err) {
+      return no(503, { error: 'kv_write_failed' });
+    }
+    addrBump(tag, now);
+    return { ok: true, owner: owner, name: name, created: true };
+  }
+
+  if (acct.lockedUntil && acct.lockedUntil > now) {
+    return no(429, { error: 'locked', retryAfter: Math.ceil((acct.lockedUntil - now) / 1000) });
+  }
+  const good = await keysMatch(await pinHash(acct.salt, pin), acct.hash);
+  if (!good) {
+    addrBump(tag, now);
+    const fails = (acct.fails || 0) + 1;
+    const locked = fails >= PIN_MAX_FAILS;
+    acct.fails = locked ? 0 : fails;
+    acct.lockedUntil = locked ? now + PIN_LOCK_MS : 0;
+    await env.AIU_QUEUE_KV.put(key, JSON.stringify(acct)).catch(() => null);
+    return locked
+      ? no(429, { error: 'locked', retryAfter: Math.ceil(PIN_LOCK_MS / 1000) })
+      : no(401, { error: 'wrong_pin', triesLeft: PIN_MAX_FAILS - fails });
+  }
+  if (acct.fails || acct.lockedUntil) {
+    acct.fails = 0;
+    acct.lockedUntil = 0;
+    await env.AIU_QUEUE_KV.put(key, JSON.stringify(acct)).catch(() => null);
+  }
+  return { ok: true, owner: owner, name: acct.name || name, created: false };
+}
+
+async function readJsonBody(request) {
+  const text = await request.text();
+  if (text.length > MAX_SUBMIT_BYTES) return { error: json({ ok: false, error: 'too_large' }, 413) };
+  try {
+    const body = JSON.parse(text);
+    if (body && typeof body === 'object') return { body: body };
+  } catch (err) {
+    // fall through
+  }
+  return { error: json({ ok: false, error: 'invalid_json' }, 400) };
+}
+
+// POST /login — { name, pin }. Lets the guest page confirm a name + PIN before they submit.
+async function handleLogin(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+  if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
+  const r = await readJsonBody(request);
+  if (r.error) return r.error;
+  const acct = await checkAccount(request, env, r.body.name, r.body.pin);
+  if (!acct.ok) return json(acct.body, acct.status);
+  return json({ ok: true, name: acct.name, owner: acct.owner, newName: acct.created });
+}
+
+// POST /account/reset (host) — { name }. Forgets that name's PIN; the next PIN used claims it again.
+async function handleAccountReset(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+  if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
+  const denied = await hostCheck(request, env);
+  if (denied) return denied;
+  const r = await readJsonBody(request);
+  if (r.error) return r.error;
+  const owner = ownerKey(r.body.name);
+  if (!owner) return json({ ok: false, error: 'missing_name' }, 400);
+  const existed = !!(await env.AIU_QUEUE_KV.get(ACCT_PREFIX + owner));
+  if (existed) await env.AIU_QUEUE_KV.delete(ACCT_PREFIX + owner);
+  return json({ ok: true, owner: owner, existed: existed });
+}
+
+// ---------- take-backs ----------
+//
+// The deck owns the queue and saves the whole thing, so the Worker can't just delete a song from it:
+// the deck's next save would put it back. Instead a take-back goes on a short list that the deck reads
+// with its inbox check. The deck removes the song and clears the entry; until then /playlist hides it.
+
+async function readWithdrawn(env) {
+  let list = null;
+  try {
+    list = await env.AIU_QUEUE_KV.get(WITHDRAWN_KEY, 'json');
+  } catch (err) {
+    list = null;
+  }
+  const cutoff = Date.now() - WITHDRAWN_TTL_MS;
+  return (Array.isArray(list) ? list : []).filter((w) => w && typeof w.wid === 'string' && typeof w.owner === 'string' && (w.at || 0) > cutoff);
+}
+
+async function writeWithdrawn(env, list) {
+  await env.AIU_QUEUE_KV.put(WITHDRAWN_KEY, JSON.stringify(list.slice(-MAX_WITHDRAWN)));
+}
+
+// A take-back only ever applies to a song by the same owner.
+function isWithdrawn(t, withdrawn) {
+  if (!t || typeof t.owner !== 'string') return false;
+  return withdrawn.some((w) => w.owner === t.owner && ((w.trackId && w.trackId === t.id) || (w.subId && w.subId === t.subId)));
+}
+
+// POST /unsubmit — { name, pin, songUuid, subId }. Takes back the guest's own song while it's waiting
+// for approval or in the playlist. Once it has started playing it stays.
+async function handleUnsubmit(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'method_not_allowed' }, 405);
+  if (!env.AIU_QUEUE_KV) return json({ ok: false, error: 'kv_not_bound' }, 503);
+  const r = await readJsonBody(request);
+  if (r.error) return r.error;
+  const body = r.body;
+  const acct = await checkAccount(request, env, body.name, body.pin);
+  if (!acct.ok) return json(acct.body, acct.status);
+  const owner = acct.owner;
+
+  const songUuid = typeof body.songUuid === 'string' && UUID_FULL.test(body.songUuid) ? body.songUuid.toLowerCase() : '';
+  const subId = typeof body.subId === 'string' && body.subId.indexOf(SUB_PREFIX) === 0 && body.subId.length <= 64 ? body.subId : '';
+  if (!songUuid && !subId) return json({ ok: false, error: 'missing_song' }, 400);
+
+  const entry = { wid: randomTag(12), owner: owner, at: Date.now() };
+  let title = null;
+  let found = false;
+
+  // 1. Still in the inbox: the deck hasn't taken it in yet.
+  if (subId) {
+    const sub = await env.AIU_QUEUE_KV.get(subId, 'json');
+    if (sub) {
+      if (sub.owner !== owner) return json({ ok: false, error: 'not_yours' }, 403);
+      await env.AIU_QUEUE_KV.delete(subId);
+      entry.subId = subId;
+      entry.songUuid = sub.songUuid;
+      title = sub.title || null;
+      found = true;
+    }
+  }
+
+  // 2. On the deck: waiting for approval or in the playlist.
+  const stored = await readQueue(env);
+  const q = stored ? stored.data : null;
+  const tracks = q && Array.isArray(q.tracks) ? q.tracks : [];
+  const matches = tracks.filter((t) => (subId && t.subId === subId) || (songUuid && t.songUuid === songUuid && (!subId || !t.subId || t.subId === subId)));
+  const mine = matches.filter((t) => t.owner === owner);
+  const live = mine.find((t) => t.status === 'incoming' || t.status === 'queued');
+  if (live) {
+    entry.trackId = live.id;
+    entry.subId = entry.subId || live.subId;
+    entry.songUuid = live.songUuid;
+    title = title || live.title || null;
+    found = true;
+  } else if (!found) {
+    const npMine = q && q.nowPlaying && mine.some((t) => t.id === q.nowPlaying.id);
+    if (npMine || mine.some((t) => t.status === 'playing')) return json({ ok: false, error: 'already_playing' }, 409);
+    if (mine.some((t) => t.status === 'played')) return json({ ok: false, error: 'already_played' }, 409);
+    if (matches.length) return json({ ok: false, error: 'not_yours' }, 403);
+    // Not in the inbox or the saved queue: the deck may be taking it in right now. Leave a take-back
+    // for that request anyway; the deck only applies it to a song by this same owner.
+    if (!subId) return json({ ok: false, error: 'not_found' }, 404);
+    entry.subId = subId;
+    entry.songUuid = songUuid || null;
+  }
+
+  const list = await readWithdrawn(env);
+  list.push(entry);
+  try {
+    await writeWithdrawn(env, list);
+  } catch (err) {
+    return json({ ok: false, error: 'kv_write_failed' }, 503);
+  }
+  try {
+    await env.AIU_QUEUE_KV.put(INBOX_MARK, String(entry.at));
+  } catch (err) {
+    // The deck still picks it up on its 5-minute full check.
+  }
+  return json({ ok: true, title: title, songUuid: entry.songUuid || songUuid || null });
 }

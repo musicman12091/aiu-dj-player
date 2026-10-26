@@ -4,7 +4,7 @@
 
 A single-page DJ deck for running live Suno listening parties from a phone (built and tested on a Samsung Galaxy A57 with Discord screen share).
 
-Current version: **v3.1**
+Current version: **v3.2**
 
 **Guest request page:** https://musicman12091.github.io/aiu-dj-player/submit.html (needs the Worker)
 
@@ -54,10 +54,17 @@ The deck saves both on the phone and immediately wipes them from the address bar
 
 A separate page for party guests. Share it with the deck's **🔗 Copy guest link** button (Pending tab).
 
-- **Submit a song** (opens first): Suno link, their name (remembered on their device), an optional note about the song (up to 280 characters), and **Fetch and Submit**. The Worker looks the song up straight away, so guests see the real title and it reaches you with title, artist and length. They can paste a whole Discord message; the first song link is used.
-- **Playlist:** Now playing (with who requested it and their note), Up next, how many songs are waiting for approval, recently played, and **Your requests** with a live status: waiting for approval → up next #n → playing now → played. It refreshes every 30 seconds.
+One screen, top to bottom:
+
+- **Name + 4-digit PIN.** The first person to use a name claims it with their PIN. The phone remembers both, so guests only enter them once. **Switch** signs out. Guests can also just fill them in and submit; that signs them in.
+- **Fetch and Submit** (big button), then a large link field, then an optional note about the song (up to 280 characters). The Worker looks the song up straight away, so guests see the real title and it reaches you with title, artist and length. They can paste a whole Discord message; the first song link is used.
+- **Your requests:** a live status for each (sent → waiting for approval → in the playlist #n → playing now → played) and an **Unsubmit** button until it starts playing. Unsubmit needs a second tap within 3 seconds.
+- **Playlist:** Now playing (with who requested it and their note), then every approved song with album art, title, artist, length and who requested it, in its own scrolling box. The counter at the top right shows how many approved songs there are and their total running time ("6 songs · 23 min"; a + means some lengths are unknown). Guests can't reorder anything. Their own songs show **Unsubmit**.
+- **Recently played** underneath. Everything refreshes every 30 seconds.
+- **PIN safety:** PINs are stored scrambled (salted hash), so nobody can read them back. Five wrong PINs in a row lock that name for 15 minutes, and one phone gets 20 wrong PINs or new names per 10 minutes.
+- **Forgotten PIN:** tap **🔑 Reset PIN** on the deck's Pending tab and type their name. Their next PIN claims the name again.
 - **Refused with a plain message:** playlist links, cover-image links, non-Suno links, a song already playing / queued / waiting, a second request from the same person within 15 seconds, and anything while requests are paused.
-- **On the deck:** requests appear in **Pending** marked REQUEST, with "🙋 requested by …" and the note. The Pending tab lights up and the status line names the requester. Nothing plays until you approve it. Who requested a song stays with it into Now Playing, Played and the shoutout copy list.
+- **On the deck:** songs a guest unsubmits disappear from Pending or Playlist at the next inbox check (within about 20 seconds), with a status line saying who took back what. Requests appear in **Pending** marked REQUEST, with "🙋 requested by …" and the note. The Pending tab lights up and the status line names the requester. Nothing plays until you approve it. Who requested a song stays with it into Now Playing, Played and the shoutout copy list.
 - **Guest requests: OPEN / PAUSED** (Pending tab) closes the inbox within seconds. Only a device with the host key can change it.
 - Unapproved requests the deck never picked up are deleted by Cloudflare after 3 days.
 
