@@ -1,0 +1,15 @@
+name = "aiu-dj-worker"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+account_id = "c1756fdad902a20a520f7e06adf6c0e4"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "AIU_QUEUE_KV"
+id = "d1e4316a4a454f0da817d7cc5efc64a4"
+
+[vars]
+STREAM_ENABLED = "true"
+
+# Secret (set once, never committed):
+#   AIU_HOST_KEY  — required for POST /queue. Set with: npx wrangler secret put AIU_HOST_KEY
