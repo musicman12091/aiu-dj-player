@@ -9,7 +9,8 @@ binding = "AIU_QUEUE_KV"
 id = "d1e4316a4a454f0da817d7cc5efc64a4"
 
 [vars]
-STREAM_ENABLED = "true"
+# Off: cdn1.suno.ai/<uuid>.mp3 is CloudFront 403 MissingKey. Set "true" only if a clear file works again.
+STREAM_ENABLED = "false"
 
 # Secret (set once, never committed):
 #   AIU_HOST_KEY  — required for POST /queue. Set with: npx wrangler secret put AIU_HOST_KEY

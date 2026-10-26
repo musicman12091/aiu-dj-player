@@ -13,11 +13,11 @@
 // POST /account/reset { name } (header X-AIU-Host-Key)  → forget a guest's PIN so they can pick a new one
 // GET  /                                                → health / config check
 //
-// Bindings: AIU_QUEUE_KV (KV namespace), AIU_HOST_KEY (secret), STREAM_ENABLED ("true"/"false"),
+// Bindings: AIU_QUEUE_KV (KV namespace), AIU_HOST_KEY (secret), STREAM_ENABLED ("true" to relay audio; default off),
 // SUBMIT_GAP_SECONDS (optional, default 15: minimum gap between requests from one address).
 // TEST_SUNO_ORIGIN / TEST_CDN_ORIGINS exist only for local tests; never set them in production.
 
-const VERSION = '3.3.0';
+const VERSION = '3.4.0';
 const UUID_SRC = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const UUID_FULL = new RegExp('^' + UUID_SRC + '$');
 const SONG_PATH = new RegExp('/(?:song|embed)/(' + UUID_SRC + ')', 'i');
@@ -126,7 +126,8 @@ function json(obj, status, extraHeaders) {
 }
 
 function streamEnabled(env) {
-  return String(env.STREAM_ENABLED || 'true').toLowerCase() !== 'false';
+  // Off unless the variable is exactly true. A missing value must not probe cdn1.suno.ai.
+  return String(env.STREAM_ENABLED || 'false').toLowerCase() === 'true';
 }
 
 function origins(env) {

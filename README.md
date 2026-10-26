@@ -4,7 +4,7 @@
 
 A single-page DJ deck for running live Suno listening parties from a phone (built and tested on a Samsung Galaxy A57 with Discord screen share).
 
-Current version: **v3.4**
+Current version: **v3.5**
 
 **Guest request page:** https://musicman12091.github.io/aiu-dj-player/submit.html (needs the Worker)
 
@@ -13,7 +13,7 @@ Current version: **v3.4**
 | | Without a Worker (default) | With the `aiu-dj-worker` Cloudflare Worker |
 |---|---|---|
 | Song lookups | Free public services (Microlink, allorigins, corsproxy.io): roughly 12–25 short links a day | Your Worker, which follows `suno.com/s/…` links itself: no daily lookup cap worth worrying about |
-| Playback | Suno's embedded player; tap Next when a song ends | Direct audio stream relayed by the Worker, auto-advancing the moment a song ends. Falls back to Suno's player automatically if a song's stream is refused |
+| Playback | Suno's embedded player. Auto-next waits for a tap when the length is unknown | Suno's embedded player, loaded straight into the iframe. Auto-next counts down `durationSeconds` from `/resolve`. Direct `/stream` and `cdn1.suno.ai` probes stay off unless `STREAM_ENABLED` is turned on |
 | Visualizer | Synthwave scene (beat is simulated) | Live frequency bars and waveform from the actual audio |
 | Queue storage | This browser only | Saved to Cloudflare KV as well, so it survives cache clears and shows on other devices |
 | Guest requests | Not available | Guests send songs from `submit.html`; they land in your Pending tab with their name and note |
@@ -33,8 +33,8 @@ The deck and the guest page already use that Worker address when `#worker=` is m
 ## What it does
 
 - **Now Playing**
-  - **Live stream (Worker):** `<audio id="nativeAudioPlayer">` plays `…/stream?id=<song>`. When it ends, the next Playlist song starts with no tap. Lock screen and notification show the song (Media Session); the notification's ⏭ works too.
-  - **Suno player fallback:** if the stream is refused (403/404), fails, or doesn't start within 12 seconds, the song moves to Suno's embed. The deck counts down the song's length (from the Worker) plus a 6-second start allowance, then moves on. **Hold** and **+30s** adjust the countdown. If the length is unknown, it says so and waits for Next.
+  - **Suno player:** `#sunoEmbedFrame` loads `suno.com/embed/<id>` as soon as the song starts. That is normal playback. `cdn1.suno.ai/<id>.mp3` is locked (CloudFront 403 MissingKey) and the page file is a scrambled `.m4a` that only Suno's player can decode, so the deck does not try `/stream` or the CDN unless `STREAM_ENABLED` is turned on in both the deck and the Worker.
+  - **Auto-next countdown:** the deck uses `durationSeconds` from `/resolve`, plus a 6-second start allowance, then moves on. **Hold** and **+30s** adjust the countdown. If the length is unknown, it says so and waits for Next. Lock screen and notification show the song (Media Session); the notification's ⏭ works too.
   - **Auto-next On/Off** switch, remembered on the phone.
   - **Visualizer:** five scenes — **Cyber Tunnel**, **Neon Fractal Plasma**, **3D Reactive Grid**, **Kaleidoscope**, **Liquid Waves**. One tap on the scene pill switches. While the Worker stream plays with CORS they react to the real audio (bass, mids, highs). Direct file playback and Suno's player use a beat engine (BPM pulse and a song-energy envelope), because that audio can't be analysed. Tap the visualizer to turn it off; tap the status line in time to set the beat engine's BPM. With reduced motion they run slowly. Phones without WebGL get the older bars and synthwave scene.
   - After a reload, a **▶ Resume** button brings back the last song. Nothing starts playing by itself.
@@ -85,7 +85,7 @@ One screen, top to bottom:
 
 ## Audio and Suno's terms
 
-Without the Worker, all audio plays through Suno's own embedded player. With the Worker, the audio file is relayed (not stored) from Suno's CDN through your Worker, so the browser can play it continuously and analyze it for the visualizer. Relaying is a different arrangement from embedding, and Suno's terms may not allow it. The Worker has a kill switch: set `STREAM_ENABLED` to `false` and every song plays through Suno's embed instead.
+Songs play in Suno's own embedded player. The deck does not download, store, or re-upload audio files. `/resolve` is used for the title, art, and length. Relaying a file through the Worker is off: `STREAM_ENABLED` defaults to `false` in `worker/wrangler.toml` and in the deck. Set both to `true` only if a clear file stream works again. Suno's terms may still not allow relaying.
 
 ## Files
 
@@ -109,3 +109,4 @@ Without the Worker, all audio plays through Suno's own embedded player. With the
 | v3.0 | Worker + auto-play | Cloudflare Worker lookups, direct streaming with hands-free auto-advance, Suno-embed fallback with length-based countdown, live Web Audio visualizer, KV queue sync with host key, Resume after reload, Media Session |
 | v3.1 | Guest requests | `submit.html` guest page (Submit / Playlist tabs), Worker inbox with cooldown, duplicate and open/closed checks, requests in Pending with requester + note, requester credited in Now Playing / Played / copy list, open/paused switch, copy guest link, 20-second cap on save delay |
 | v3.4 | THADEUS-001/002/003 | Resolve returns the audio URL scraped from the Suno embed (or og:audio). If `/stream` fails, the deck plays that URL — or `cdn1.suno.ai/<id>.mp3` — in `#nativeAudioPlayer` without `crossorigin`, then Suno's embed. Deck and guest page default to `https://aiu-dj-worker.musicman12091.workers.dev`. Guest playlist and recently played stay visible while requests are paused; a live session keeps the inbox open. Five-scene 60fps visualizer with a scene pill and a beat engine when the analyser is silent. |
+| v3.5 | THADEUS-004 | Suno's embed is the player. The deck skips `/stream` and `cdn1.suno.ai` (`STREAM_ENABLED` defaults to false on the deck and the Worker) and no longer shows "Direct stream unavailable". Auto-next still counts down `durationSeconds` from `/resolve`, and the five-scene visualizer still runs on every song. |
