@@ -1,14 +1,14 @@
 # aiu-dj-worker
 
-The Cloudflare Worker behind DJ Deck v3.2. One file (`src/index.js`), no dependencies, free plan.
+The Cloudflare Worker behind DJ Deck v3.4 (worker 3.3.0). One file (`src/index.js`), no dependencies, free plan. Live address: `https://aiu-dj-worker.musicman12091.workers.dev`.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /resolve?url=<suno link>` | Follows `suno.com/s/…` redirects, refuses playlist and cover-image links, and returns `{ ok, songUuid, title, artist, originalUrl, embedUrl, audioUrl, streamProxyUrl, coverUrl, durationSeconds }`. Titles are decoded (`&#xE9;` → é). Only Suno addresses are accepted, so it can't be used as an open proxy. |
-| `GET /stream?id=<song id>` | Relays `cdn1.suno.ai/<id>.mp3` (cdn2 as backup) with `Access-Control-Allow-Origin: *` and byte ranges (206), so the deck's `<audio crossorigin="anonymous">` and visualizer work. Returns 403 `stream_locked` or 404 `stream_unavailable` when Suno refuses, and the deck switches to Suno's embed. |
+| `GET /resolve?url=<suno link>` | Follows `suno.com/s/…` redirects, refuses playlist and cover-image links, and returns `{ ok, songUuid, title, artist, originalUrl, embedUrl, audioUrl, audioUrlSource, streamProxyUrl, coverUrl, durationSeconds }`. `audioUrl` is scraped from `suno.com/embed/<id>` (JSON `audio_url` / `media_urls`, or `og:audio`). Titles are decoded (`&#xE9;` → é). Only Suno addresses are accepted, so it can't be used as an open proxy. |
+| `GET /stream?id=<song id>` | Relays a clear audio file (the scraped URL when it is a real container, then `cdn1` / `cdn2`) with `Access-Control-Allow-Origin: *` and byte ranges. Encrypted blobs and 403s are refused so the deck can try the file directly from the listener's browser, then Suno's embed. |
 | `GET /queue` | The saved queue (anyone can read). |
 | `POST /queue` | Saves the queue (up to 500 songs, 1 MB). Needs header `X-AIU-Host-Key`. |
-| `GET /playlist` | Slim public view for the guest page: now playing, up next, recently played, how many are waiting, open/paused. Notes on songs still waiting for approval aren't included. |
+| `GET /playlist` | Slim public view for the guest page: now playing, up next, recently played, how many are waiting, open/paused. `inboxOpen` stays true while a session queue is active so Playlist and Recently Played still show when new requests are paused. Notes on songs still waiting for approval aren't included. |
 | `POST /submit` | Guest request `{ url, name, pin, blurb }`. Needs a valid name + PIN (a new name is claimed). Looks the song up, refuses duplicates and anything while paused, allows one request per address every 15 seconds, and stores it for the deck (kept up to 3 days). |
 | `GET /inbox` | Waiting guest requests, plus `withdrawn` (songs guests took back). Needs `X-AIU-Host-Key`. `?since=<marker>` answers instantly when nothing new has arrived. |
 | `POST /login` | `{ name, pin }` checks a guest's name + 4-digit PIN. The first PIN used with a name claims it. PINs are stored as salted SHA-256 hashes. 5 wrong in a row lock the name for 15 minutes (`locked`, `retryAfter`); otherwise `wrong_pin` with `triesLeft`. |

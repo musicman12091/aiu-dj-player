@@ -17,7 +17,7 @@
 // SUBMIT_GAP_SECONDS (optional, default 15: minimum gap between requests from one address).
 // TEST_SUNO_ORIGIN / TEST_CDN_ORIGINS exist only for local tests; never set them in production.
 
-const VERSION = '3.2.0';
+const VERSION = '3.3.0';
 const UUID_SRC = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const UUID_FULL = new RegExp('^' + UUID_SRC + '$');
 const SONG_PATH = new RegExp('/(?:song|embed)/(' + UUID_SRC + ')', 'i');
@@ -28,6 +28,8 @@ const MAX_HTML_BYTES = 1500000;
 const RESOLVE_CACHE_MAX = 500;
 const RESOLVE_TTL_MS = 6 * 60 * 60 * 1000;
 const UA = 'AIU-DJ-Worker/' + VERSION + ' (+https://musicman12091.github.io/aiu-dj-player/)';
+// Browser-like headers. Suno serves the real audio_url to document navigations, not to bot UAs.
+const PAGE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const SUB_PREFIX = 'sub:';
 const INBOX_MARK = 'inbox:last';
 const SUB_TTL_SECONDS = 3 * 24 * 60 * 60; // unclaimed requests disappear after 3 days
@@ -286,6 +288,93 @@ function findDuration(html, uuid, head) {
   return null;
 }
 
+function pageHeaders() {
+  return {
+    'User-Agent': PAGE_UA,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    Referer: 'https://suno.com/',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1'
+  };
+}
+
+// Undo JSON escaping so "audio_url":"https://..." is visible in Next.js payloads.
+function loosen(html) {
+  return String(html || '')
+    .replace(/\\u002[fF]/g, '/')
+    .replace(/\\\//g, '/')
+    .replace(/\\"/g, '"')
+    .replace(/&#x2[fF];|&#47;/g, '/');
+}
+
+function forbiddenAudio(u) {
+  return /\/api\/forbidden(?:\/|$|\?)/i.test(String(u || ''));
+}
+
+function audioScore(u) {
+  let s = 0;
+  if (/\.mp3(\?|$)/i.test(u)) s += 8;
+  else if (/\.wav(\?|$)/i.test(u) || /\.aac(\?|$)/i.test(u)) s += 6;
+  else if (/\.m4a(\?|$)/i.test(u) || /\.mp4(\?|$)/i.test(u)) s += 4;
+  else if (/\.(ogg|opus|webm)(\?|$)/i.test(u)) s += 3;
+  if (/cdn1\.suno\.ai/i.test(u)) s += 1;
+  return s;
+}
+
+// A playable https URL that belongs to this song. Rejects the "api/forbidden" placeholder.
+function allowedAudioUrl(u, uuid) {
+  let parsed;
+  try {
+    parsed = new URL(String(u || ''));
+  } catch (err) {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (forbiddenAudio(parsed.href)) return false;
+  const host = parsed.hostname.toLowerCase();
+  const hostOk = host.endsWith('.suno.ai') || host.endsWith('.suno.com') || host.endsWith('.cloudfront.net') || host === 'suno.com' || host === 'suno.ai';
+  if (!hostOk) return false;
+  if (uuid && parsed.href.toLowerCase().indexOf(String(uuid).toLowerCase()) === -1) return false;
+  return /\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)(\?|$)/i.test(parsed.pathname);
+}
+
+// Canonical file URL from the embed/song payload: og:audio, JSON audio_url, then media_urls.
+function extractAudioUrl(html, uuid) {
+  const text = loosen(html);
+  const head = headOf(text);
+  const found = [];
+  const push = (raw) => {
+    const u = decodeEntities(raw || '').trim();
+    if (allowedAudioUrl(u, uuid) && found.indexOf(u) === -1) found.push(u);
+  };
+  push(metaContent(head, 'og:audio'));
+  push(metaContent(head, 'og:audio:url'));
+  push(metaContent(head, 'og:audio:secure_url'));
+  let m;
+  const reAudio = /"audio_url"\s*:\s*"(https:[^"]+)"/g;
+  while ((m = reAudio.exec(text))) push(m[1]);
+  const reMedia = /"url"\s*:\s*"(https:[^"]+)"/g;
+  while ((m = reMedia.exec(text))) push(m[1]);
+  found.sort((a, b) => audioScore(b) - audioScore(a));
+  return found.length ? found[0] : null;
+}
+
+function audioMagic(bytes) {
+  if (!bytes || bytes.length < 4) return false;
+  const b = bytes;
+  const four = String.fromCharCode(b[0], b[1], b[2], b[3]);
+  if (four === 'OggS' || four === 'RIFF' || four === 'fLaC') return true;
+  if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return true; // ID3
+  if (b.length >= 8 && String.fromCharCode(b[4], b[5], b[6], b[7]) === 'ftyp') return true;
+  if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) return true;
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return true;
+  return false;
+}
+
 function parseSongPage(html, uuid) {
   const head = headOf(html);
   const ogTitle = metaContent(head, 'og:title');
@@ -310,13 +399,13 @@ function parseSongPage(html, uuid) {
     title: title || null,
     artist: artist || null,
     coverUrl: /^https:\/\//.test(ogImage) ? ogImage : null,
-    audioUrl: new RegExp(uuid + '\\.mp3', 'i').test(ogAudio) ? ogAudio : null,
+    audioUrl: extractAudioUrl(html, uuid),
     durationSeconds: findDuration(html, uuid, head)
   };
 }
 
 async function fetchHtml(url) {
-  const res = await fetch(url, { redirect: 'manual', headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml' } });
+  const res = await fetch(url, { redirect: 'manual', headers: pageHeaders() });
   return res;
 }
 
@@ -372,20 +461,42 @@ async function resolveSong(input, env, selfOrigin) {
     html = r.html;
   }
 
-  let meta = { title: null, artist: null, coverUrl: null, audioUrl: null, durationSeconds: null };
+  const pages = [];
+  if (html) pages.push(html);
   let metaStatus = 'ok';
-  if (!html) {
+  const { suno } = origins(env);
+  // Embed first (that's where the player payload lives), then the song page for og:audio / title.
+  const fetched = await Promise.all(['/embed/' + uuid, '/song/' + uuid].map(async (path) => {
     try {
-      const res = await fetchHtml(origins(env).suno + '/song/' + uuid);
-      if (res.ok) html = await readCapped(res, MAX_HTML_BYTES);
-      else metaStatus = 'upstream_' + res.status;
+      const res = await fetchHtml(suno + path);
+      if (res.ok) return await readCapped(res, MAX_HTML_BYTES);
+      if (res.body) {
+        try { await res.body.cancel(); } catch (err) { /* ignore */ }
+      }
+      return { status: res.status };
     } catch (err) {
-      metaStatus = 'upstream_error';
+      return { status: 'error' };
     }
+  }));
+  let upstreamStatus = null;
+  for (const item of fetched) {
+    if (typeof item === 'string') pages.push(item);
+    else if (!upstreamStatus && item && item.status) upstreamStatus = item.status;
   }
-  if (html) meta = parseSongPage(html, uuid);
+  if (!pages.length) metaStatus = 'upstream_' + (upstreamStatus || 'error');
+
+  let meta = { title: null, artist: null, coverUrl: null, audioUrl: null, durationSeconds: null };
+  for (const page of pages) {
+    const parsed = parseSongPage(page, uuid);
+    if (!meta.title && parsed.title) meta.title = parsed.title;
+    if (!meta.artist && parsed.artist) meta.artist = parsed.artist;
+    if (!meta.coverUrl && parsed.coverUrl) meta.coverUrl = parsed.coverUrl;
+    if (!meta.durationSeconds && parsed.durationSeconds) meta.durationSeconds = parsed.durationSeconds;
+    if (parsed.audioUrl && (!meta.audioUrl || audioScore(parsed.audioUrl) > audioScore(meta.audioUrl))) meta.audioUrl = parsed.audioUrl;
+  }
 
   const self = selfOrigin;
+  const scraped = meta.audioUrl;
   const body = {
     ok: true,
     songUuid: uuid,
@@ -393,7 +504,8 @@ async function resolveSong(input, env, selfOrigin) {
     artist: meta.artist,
     originalUrl: 'https://suno.com/song/' + uuid,
     embedUrl: 'https://suno.com/embed/' + uuid,
-    audioUrl: meta.audioUrl || 'https://cdn1.suno.ai/' + uuid + '.mp3',
+    audioUrl: scraped || 'https://cdn1.suno.ai/' + uuid + '.mp3',
+    audioUrlSource: scraped ? 'page' : 'cdn_guess',
     streamProxyUrl: streamEnabled(env) ? self + '/stream?id=' + uuid : null,
     coverUrl: meta.coverUrl,
     durationSeconds: meta.durationSeconds,
@@ -408,41 +520,117 @@ async function resolveSong(input, env, selfOrigin) {
 
 // ---------- /stream ----------
 
+async function openAudio(request, upstreamUrl) {
+  const range = request.headers.get('Range');
+  const method = request.method === 'HEAD' ? 'HEAD' : 'GET';
+  const upstream = await fetch(upstreamUrl, {
+    method: method,
+    redirect: 'follow',
+    headers: Object.assign(
+      {
+        'User-Agent': PAGE_UA,
+        Referer: 'https://suno.com/',
+        Origin: 'https://suno.com',
+        Accept: 'audio/*,*/*;q=0.8'
+      },
+      range ? { Range: range } : {}
+    )
+  });
+  if (upstream.status !== 200 && upstream.status !== 206 && upstream.status !== 416) {
+    if (upstream.body) {
+      try { await upstream.body.cancel(); } catch (err) { /* ignore */ }
+    }
+    return { upstream: null, status: upstream.status };
+  }
+  if (method === 'HEAD' || upstream.status === 416) return { upstream: upstream, status: upstream.status };
+  const type = upstream.headers.get('Content-Type') || '';
+  const startAtZero = !range || /^bytes=0-/i.test(range);
+  if (startAtZero && upstream.body) {
+    const reader = upstream.body.getReader();
+    const first = await reader.read();
+    const prefix = first.value || new Uint8Array();
+    const peeked = new Response(new ReadableStream({
+      async start(controller) {
+        if (prefix.byteLength) controller.enqueue(prefix);
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
+        }
+      }
+    }), { status: upstream.status, headers: upstream.headers });
+    // Clear audio starts with a known container. Encrypted Suno blobs do not — leave those
+    // for the browser to request directly from the listener's own IP.
+    if (!/^audio\//i.test(type) || !audioMagic(prefix)) {
+      try { await peeked.body.cancel(); } catch (err) { /* ignore */ }
+      return { upstream: null, status: 415 };
+    }
+    return { upstream: peeked, status: upstream.status };
+  }
+  if (!/^audio\//i.test(type)) {
+    if (upstream.body) {
+      try { await upstream.body.cancel(); } catch (err) { /* ignore */ }
+    }
+    return { upstream: null, status: 415 };
+  }
+  return { upstream: upstream, status: upstream.status };
+}
+
+function proxyAudio(request, opened, sourceHost) {
+  const upstream = opened.upstream;
+  const h = new Headers(CORS);
+  for (const name of ['Content-Length', 'Content-Range', 'Accept-Ranges', 'ETag', 'Last-Modified']) {
+    const v = upstream.headers.get(name);
+    if (v) h.set(name, v);
+  }
+  const type = upstream.headers.get('Content-Type') || '';
+  h.set('Content-Type', /^audio\//i.test(type) ? type : 'audio/mpeg');
+  if (!h.has('Accept-Ranges')) h.set('Accept-Ranges', 'bytes');
+  h.set('Cache-Control', upstream.status === 416 ? 'no-store' : 'public, max-age=86400');
+  h.set('X-AIU-Source', sourceHost);
+  return new Response(request.method === 'HEAD' ? null : upstream.body, { status: upstream.status, headers: h });
+}
+
 async function handleStream(request, url, env) {
   if (!streamEnabled(env)) return json({ ok: false, error: 'stream_disabled' }, 404);
   const id = (url.searchParams.get('id') || '').toLowerCase();
   if (!UUID_FULL.test(id)) return json({ ok: false, error: 'invalid_id' }, 400);
 
-  const range = request.headers.get('Range');
+  const candidates = [];
+  try {
+    const resolved = await resolveSong(id, env, url.origin);
+    const scraped = resolved && resolved.body && resolved.body.audioUrlSource === 'page' ? resolved.body.audioUrl : '';
+    if (scraped && allowedAudioUrl(scraped, id)) candidates.push(scraped);
+  } catch (err) {
+    // CDN guesses below still run
+  }
+  for (const base of origins(env).cdn) candidates.push(base + '/' + id + '.mp3');
+
   const tried = [];
-  for (const base of origins(env).cdn) {
-    const upstream = await fetch(base + '/' + id + '.mp3', {
-      method: request.method === 'HEAD' ? 'HEAD' : 'GET',
-      headers: Object.assign({ 'User-Agent': UA }, range ? { Range: range } : {})
-    });
-    tried.push(upstream.status);
-    if (upstream.status === 200 || upstream.status === 206 || upstream.status === 416) {
-      const h = new Headers(CORS);
-      for (const name of ['Content-Length', 'Content-Range', 'Accept-Ranges', 'ETag', 'Last-Modified']) {
-        const v = upstream.headers.get(name);
-        if (v) h.set(name, v);
-      }
-      const type = upstream.headers.get('Content-Type') || '';
-      h.set('Content-Type', /^audio\//i.test(type) ? type : 'audio/mpeg');
-      if (!h.has('Accept-Ranges')) h.set('Accept-Ranges', 'bytes');
-      h.set('Cache-Control', upstream.status === 416 ? 'no-store' : 'public, max-age=86400');
-      h.set('X-AIU-Source', new URL(base).hostname);
-      return new Response(request.method === 'HEAD' ? null : upstream.body, { status: upstream.status, headers: h });
+  const seen = {};
+  for (const target of candidates) {
+    if (seen[target]) continue;
+    seen[target] = true;
+    let opened;
+    try {
+      opened = await openAudio(request, target);
+    } catch (err) {
+      tried.push('error');
+      continue;
     }
-    if (upstream.body) {
-      try {
-        await upstream.body.cancel();
-      } catch (err) {
-        // ignore
-      }
+    tried.push(opened.status);
+    if (opened.upstream) {
+      let host = 'audio';
+      try { host = new URL(target).hostname; } catch (err) { /* ignore */ }
+      return proxyAudio(request, opened, host);
     }
   }
-  const locked = tried.some((s) => s === 401 || s === 403);
+  const locked = tried.some((s) => s === 401 || s === 403 || s === 415);
   return json({ ok: false, error: locked ? 'stream_locked' : 'stream_unavailable', upstreamStatus: tried }, locked ? 403 : 404);
 }
 
@@ -461,7 +649,7 @@ function cleanTrack(t) {
   const out = {};
   for (const [k, v] of Object.entries(t)) {
     if (k.length > 40) continue;
-    if (typeof v === 'string') out[k] = v.slice(0, 600);
+    if (typeof v === 'string') out[k] = v.slice(0, k === 'audioUrl' ? 2000 : 600);
     else if (typeof v === 'number' || typeof v === 'boolean' || v === null) out[k] = v;
   }
   return typeof out.id === 'string' && typeof out.songUuid === 'string' ? out : null;
@@ -579,10 +767,15 @@ async function handlePlaylist(env) {
     nowPlaying = pick(Object.assign({}, d.nowPlaying, { owner: rec.owner, submittedBy: rec.submittedBy, blurb: rec.blurb, coverUrl: d.nowPlaying.coverUrl || rec.coverUrl }));
   }
   const played = tracks.filter((t) => t.status === 'played').sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+  const explicitlyPaused = !!(d && d.submissionsOpen === false);
+  const sessionActive = !!nowPlaying || tracks.some((t) => t.status === 'incoming' || t.status === 'queued' || t.status === 'playing');
   return json({
     ok: true,
     updatedAt: stored ? stored.updatedAt : 0,
-    submissionsOpen: !d || d.submissionsOpen !== false,
+    // New requests follow the DJ's pause switch. A live session still counts as an open inbox
+    // so desktop and the guest page show Playlist / Recently Played instead of "not open yet".
+    submissionsOpen: !explicitlyPaused,
+    inboxOpen: sessionActive || !explicitlyPaused,
     nowPlaying: nowPlaying,
     upNext: tracks.filter((t) => t.status === 'queued').slice(0, 100).map(pick),
     recent: played.slice(0, 10).map(pick),

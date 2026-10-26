@@ -4,7 +4,7 @@
 
 A single-page DJ deck for running live Suno listening parties from a phone (built and tested on a Samsung Galaxy A57 with Discord screen share).
 
-Current version: **v3.3**
+Current version: **v3.4**
 
 **Guest request page:** https://musicman12091.github.io/aiu-dj-player/submit.html (needs the Worker)
 
@@ -25,10 +25,10 @@ With no Worker set, v3.0 behaves exactly like v2.4 (same regression tests).
 Deploy the Worker first: see [`worker/README.md`](worker/README.md). Then open this link once on the phone that runs the party, with your two values filled in:
 
 ```
-https://musicman12091.github.io/aiu-dj-player/#worker=https://aiu-dj-worker.<your-subdomain>.workers.dev&key=<your host key>
+https://musicman12091.github.io/aiu-dj-player/#worker=https://aiu-dj-worker.musicman12091.workers.dev&key=<your host key>
 ```
 
-The deck saves both on the phone and immediately wipes them from the address bar. Other devices can open the link with only `#worker=…` (no key) to watch the queue read-only.
+The deck and the guest page already use that Worker address when `#worker=` is missing. The deck saves a `#key=` on the phone and immediately wipes it from the address bar. Other devices can open the plain GitHub Pages URL to follow the queue read-only.
 
 ## What it does
 
@@ -36,7 +36,7 @@ The deck saves both on the phone and immediately wipes them from the address bar
   - **Live stream (Worker):** `<audio id="nativeAudioPlayer">` plays `…/stream?id=<song>`. When it ends, the next Playlist song starts with no tap. Lock screen and notification show the song (Media Session); the notification's ⏭ works too.
   - **Suno player fallback:** if the stream is refused (403/404), fails, or doesn't start within 12 seconds, the song moves to Suno's embed. The deck counts down the song's length (from the Worker) plus a 6-second start allowance, then moves on. **Hold** and **+30s** adjust the countdown. If the length is unknown, it says so and waits for Next.
   - **Auto-next On/Off** switch, remembered on the phone.
-  - **Visualizer:** three psychedelic scenes, a new one each song: **Kaleidoscope**, **Colour tunnel** and **Liquid waves**. While the Worker stream plays they react to the real audio (bass, mids, highs, beat). While Suno's player is in use they follow a simulated 120 BPM beat, because audio inside Suno's player can't be read by the page. They render at reduced resolution and about 40 frames a second to spare the battery. Tap the visualizer to turn it off. With reduced motion turned on they run slowly with no beat flashes. Phones without WebGL get the older bars and synthwave scene.
+  - **Visualizer:** five scenes — **Cyber Tunnel**, **Neon Fractal Plasma**, **3D Reactive Grid**, **Kaleidoscope**, **Liquid Waves**. One tap on the scene pill switches. While the Worker stream plays with CORS they react to the real audio (bass, mids, highs). Direct file playback and Suno's player use a beat engine (BPM pulse and a song-energy envelope), because that audio can't be analysed. Tap the visualizer to turn it off; tap the status line in time to set the beat engine's BPM. With reduced motion they run slowly. Phones without WebGL get the older bars and synthwave scene.
   - After a reload, a **▶ Resume** button brings back the last song. Nothing starts playing by itself.
 - **Fetch and Submit:** paste Suno song links, `suno.com/s/…` short links (with or without `https://`), bare song IDs, or a whole Discord message. Playlist links, cover-image links and duplicates are refused with a message. Song length shows on each card when known.
 - **Tabs**
@@ -108,3 +108,4 @@ Without the Worker, all audio plays through Suno's own embedded player. With the
 | v2.4 | Audit Option C | Inline CSS, Played history, undo and tap-twice safety, 44 px targets, pinch zoom, priority lookup lane, stricter link parsing, duplicate check, cleaned lookup storage |
 | v3.0 | Worker + auto-play | Cloudflare Worker lookups, direct streaming with hands-free auto-advance, Suno-embed fallback with length-based countdown, live Web Audio visualizer, KV queue sync with host key, Resume after reload, Media Session |
 | v3.1 | Guest requests | `submit.html` guest page (Submit / Playlist tabs), Worker inbox with cooldown, duplicate and open/closed checks, requests in Pending with requester + note, requester credited in Now Playing / Played / copy list, open/paused switch, copy guest link, 20-second cap on save delay |
+| v3.4 | THADEUS-001/002/003 | Resolve returns the audio URL scraped from the Suno embed (or og:audio). If `/stream` fails, the deck plays that URL — or `cdn1.suno.ai/<id>.mp3` — in `#nativeAudioPlayer` without `crossorigin`, then Suno's embed. Deck and guest page default to `https://aiu-dj-worker.musicman12091.workers.dev`. Guest playlist and recently played stay visible while requests are paused; a live session keeps the inbox open. Five-scene 60fps visualizer with a scene pill and a beat engine when the analyser is silent. |
