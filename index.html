@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>AI: Underground — DJ Deck v2.1</title>
+  <title>AI: Underground — DJ Deck v2.2</title>
   <script src="https://cdn.tailwindcss.com/3.4.17" async></script>
   <style>
     body {
@@ -38,7 +38,7 @@
         </span>
         <h1 class="text-sm font-bold text-white truncate">DJ Deck</h1>
         <span class="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
-          v2.1
+          v2.2
         </span>
       </div>
       <div class="flex items-center gap-1.5 min-w-0">
@@ -317,11 +317,33 @@
         return found;
       }
 
+      // Undo the escaping that hides song paths in lookup responses: JSON-escaped
+      // slashes, HTML entities, and URL-encoded redirect targets
+      // (suno.com/s/CODE bounces through /auth/session-recovery?...%2Fsong%2F<id>).
+      function normalizeForIds(raw) {
+        let s = String(raw || '')
+          .replace(/\\u002[fF]/g, '/')
+          .replace(/\\\//g, '/')
+          .replace(/&#x2[fF];|&#47;/g, '/');
+        for (let i = 0; i < 2; i++) {
+          s = s
+            .replace(/%25/g, '%')
+            .replace(/%2[fF]/g, '/')
+            .replace(/%3[aA]/g, ':')
+            .replace(/%3[fF]/g, '?')
+            .replace(/%3[dD]/g, '=')
+            .replace(/%26/g, '&');
+        }
+        return s;
+      }
+
       // Find the song's own ID in a lookup response. Prefers the page's own
-      // og:url / canonical tag over any other song link on the page.
-      function extractSongUuid(text) {
-        if (!text) return null;
-        const songRe = new RegExp('suno\\.(?:com|ai)\\/(?:song|embed)\\/(' + UUID_SRC + ')', 'i');
+      // og:url / canonical tag over any other song link on the page, then any
+      // /song/ or /embed/ path (absolute or relative), then the audio file, then the cover image.
+      function extractSongUuid(raw) {
+        if (!raw) return null;
+        const text = normalizeForIds(raw);
+        const songRe = new RegExp('\\/(?:song|embed)\\/(' + UUID_SRC + ')', 'i');
         const tagPatterns = [
           /<meta[^>]+og:url[^>]*>/i,
           /<link[^>]+rel=["']canonical["'][^>]*>/i
@@ -337,6 +359,8 @@
         if (anySong) return anySong[1].toLowerCase();
         const audio = text.match(new RegExp('cdn\\d*\\.suno\\.ai\\/(' + UUID_SRC + ')\\.mp3', 'i'));
         if (audio) return audio[1].toLowerCase();
+        const cover = text.match(new RegExp('suno\\.ai\\/image_(?:large_)?(' + UUID_SRC + ')', 'i'));
+        if (cover) return cover[1].toLowerCase();
         return null;
       }
 
@@ -475,6 +499,7 @@
             applyResolved(track, res);
             saveState();
             renderQueue();
+            if (!track.titled) fetchTitle(track);
             return true;
           }
           saveState();
