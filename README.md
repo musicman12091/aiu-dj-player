@@ -4,7 +4,7 @@
 
 A single-page DJ deck for running live Suno listening parties from a phone (built and tested on a Samsung Galaxy A57 with Discord screen share).
 
-Current version: **v3.2**
+Current version: **v3.3**
 
 **Guest request page:** https://musicman12091.github.io/aiu-dj-player/submit.html (needs the Worker)
 
@@ -36,7 +36,7 @@ The deck saves both on the phone and immediately wipes them from the address bar
   - **Live stream (Worker):** `<audio id="nativeAudioPlayer">` plays `…/stream?id=<song>`. When it ends, the next Playlist song starts with no tap. Lock screen and notification show the song (Media Session); the notification's ⏭ works too.
   - **Suno player fallback:** if the stream is refused (403/404), fails, or doesn't start within 12 seconds, the song moves to Suno's embed. The deck counts down the song's length (from the Worker) plus a 6-second start allowance, then moves on. **Hold** and **+30s** adjust the countdown. If the length is unknown, it says so and waits for Next.
   - **Auto-next On/Off** switch, remembered on the phone.
-  - **Visualizer:** 48 neon frequency bars plus waveform from the real audio while streaming. While Suno's player is in use it shows a synthwave scene with a simulated beat, because audio inside Suno's player can't be read by the page. Tap the visualizer to turn it off. It's at reduced frame rate for people who've turned on reduced motion.
+  - **Visualizer:** three psychedelic scenes, a new one each song: **Kaleidoscope**, **Colour tunnel** and **Liquid waves**. While the Worker stream plays they react to the real audio (bass, mids, highs, beat). While Suno's player is in use they follow a simulated 120 BPM beat, because audio inside Suno's player can't be read by the page. They render at reduced resolution and about 40 frames a second to spare the battery. Tap the visualizer to turn it off. With reduced motion turned on they run slowly with no beat flashes. Phones without WebGL get the older bars and synthwave scene.
   - After a reload, a **▶ Resume** button brings back the last song. Nothing starts playing by itself.
 - **Fetch and Submit:** paste Suno song links, `suno.com/s/…` short links (with or without `https://`), bare song IDs, or a whole Discord message. Playlist links, cover-image links and duplicates are refused with a message. Song length shows on each card when known.
 - **Tabs**
