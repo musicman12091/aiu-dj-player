@@ -58,15 +58,31 @@ async function snap(page) {
   return page.evaluate(function () {
     const st = window.__aiuDeck.getState();
     const src = document.getElementById('sunoEmbedFrame').getAttribute('src') || '';
+    const pre = document.getElementById('sunoPreCueFrame');
     return {
       title: st.nowPlaying && st.nowPlaying.title,
       id: st.nowPlaying && st.nowPlaying.id,
       uuid: st.nowPlaying && st.nowPlaying.songUuid,
       src: src,
+      preCueTitle: st.preCue && st.preCue.title,
+      preCueId: st.preCue && st.preCue.id,
+      preCueUuid: st.preCue && st.preCue.songUuid,
+      preSrc: pre ? (pre.getAttribute('src') || '') : '',
+      slotTitle: document.getElementById('preCueTitle').textContent,
       status: document.getElementById('statusText').textContent,
       autoText: document.getElementById('autoText').textContent
     };
   });
+}
+
+function waitForSong(page, uuid, precueUuid) {
+  return page.waitForFunction(function (song, cue) {
+    const st = window.__aiuDeck.getState();
+    if (!st.nowPlaying || st.nowPlaying.songUuid !== song) return false;
+    if (cue && (!st.preCue || st.preCue.songUuid !== cue)) return false;
+    if (!cue && st.preCue) return false;
+    return true;
+  }, { timeout: 12000 }, uuid, precueUuid || '');
 }
 
 function assert(cond, msg, detail) {
@@ -94,10 +110,19 @@ try {
       track('c', CCC, 'Charlie')
     ]);
     await page.click('#btnAdvanceNext');
-    await new Promise(function (r) { setTimeout(r, 10000); });
+    await waitForSong(page, AAA, BBB);
+    const mid = await snap(page);
+    assert(mid.slotTitle === 'Bravo', 'Pre-cue slot shows the upcoming song while Alpha plays', mid);
+    assert(mid.preCueUuid === BBB && mid.preCueId !== mid.id, 'Pre-cue is a different row from Now Playing', mid);
+    assert(mid.preSrc.indexOf(BBB) !== -1, 'hidden iframe preloads Bravo', mid);
+    assert(mid.preSrc.indexOf('autoplay') === -1, 'preload does not autoplay', mid);
+    assert(mid.src.indexOf(AAA) !== -1 && mid.src.indexOf('autoplay=1') !== -1, 'Alpha embed autoplays', mid);
+    await waitForSong(page, BBB, CCC);
     const s = await snap(page);
     assert(s.title === 'Bravo', 'title is Bravo', s);
     assert(s.uuid === BBB, 'uuid changed', s);
+    assert(s.uuid !== mid.uuid, 'countdown did not repeat Alpha', s);
+    assert(s.preCueUuid === CCC, 'Playlist refilled Pre-cue with Charlie', s);
     assert(s.src.indexOf('autoplay=1') !== -1, 'next embed asks Suno to autoplay', s);
     await page.close();
   }
@@ -111,10 +136,16 @@ try {
       track('id4', CCC, 'Charlie')
     ]);
     await page.click('#btnAdvanceNext');
+    await waitForSong(page, AAA, BBB);
     await page.evaluate(function () {
       const st = window.__aiuDeck.getState();
       const cur = st.tracks.find(function (t) { return t.id === st.nowPlaying.id; });
       if (cur) cur.status = 'queued';
+      st.preCue = {
+        id: st.nowPlaying.id,
+        songUuid: st.nowPlaying.songUuid,
+        title: st.nowPlaying.title
+      };
     });
     await new Promise(function (r) { setTimeout(r, 10000); });
     const s = await snap(page);
@@ -161,6 +192,30 @@ try {
     const s = await snap(page);
     assert(s.uuid === BBB && s.title === 'Bravo', 'advances once the real end has passed, without waiting a fresh full length', s);
     assert(s.src.indexOf('autoplay=1') !== -1, 'late advance still uses autoplay', s);
+    await page.close();
+  }
+
+  console.log('4. manual Play Next uses Pre-cue and does not repeat');
+  {
+    const page = await boot(browser, [
+      track('a', AAA, 'Alpha', { durationSeconds: 180 }),
+      track('b', BBB, 'Bravo', { durationSeconds: 180 }),
+      track('c', CCC, 'Charlie', { durationSeconds: 180 })
+    ]);
+    await page.click('#btnAdvanceNext');
+    await waitForSong(page, AAA, BBB);
+    let s = await snap(page);
+    assert(s.slotTitle === 'Bravo', 'slot shows Bravo before the manual swap', s);
+    await page.click('#btnAdvanceNext');
+    await waitForSong(page, BBB, CCC);
+    s = await snap(page);
+    assert(s.uuid === BBB && s.preCueUuid === CCC, 'manual Play Next swapped Pre-cue to Now Playing and refilled', s);
+    assert(s.src.indexOf(BBB) !== -1 && s.src.indexOf('autoplay=1') !== -1, 'manual swap autoplays the new song', s);
+    await page.click('#btnAdvanceNext');
+    await waitForSong(page, CCC, '');
+    s = await snap(page);
+    assert(s.uuid === CCC && !s.preCueId, 'third Play Next is Charlie and Pre-cue is empty', s);
+    assert(s.slotTitle === 'Nothing in Pre-cue', 'empty Pre-cue is labeled', s);
     await page.close();
   }
 } finally {

@@ -4,7 +4,7 @@
 
 A single-page DJ deck for running live Suno listening parties from a phone or a desktop window (built for a Samsung Galaxy A57 and a Chrome window shared in Discord).
 
-Current version: **v3.7**
+Current version: **v3.8**
 
 **Guest request page:** https://musicman12091.github.io/aiu-dj-player/submit.html (needs the Worker)
 
@@ -34,7 +34,8 @@ The deck and the guest page already use that Worker address when `#worker=` is m
 
 - **Now Playing**
   - **Suno player:** `#sunoEmbedFrame` loads `suno.com/embed/<id>` as soon as the song starts. That is normal playback. `cdn1.suno.ai/<id>.mp3` is locked (CloudFront 403 MissingKey) and the page file is a scrambled `.m4a` that only Suno's player can decode, so the deck does not try `/stream` or the CDN unless `STREAM_ENABLED` is turned on in both the deck and the Worker.
-  - **Auto-next countdown:** the deck uses `durationSeconds` from `/resolve`, plus a 6-second start allowance measured from when the song started (a length that arrives late does not restart the clock). When that countdown hits 0 the deck loads the next different Playlist song, including if the tab was in the background. The song that just finished is marked played even if its row was still queued. A second copy of the song already playing is skipped when another song is waiting. **Hold** and **+30s** adjust the countdown. If the length is unknown, it says so and waits for Next. Lock screen and notification show the song (Media Session); the notification's ⏭ works too.
+  - **Pre-cue (Next):** the slot in front of the song that is playing. The next Playlist song is moved here and pre-loaded in a hidden Suno embed (no autoplay, so it stays silent). The deck shows that title the whole time something is playing.
+  - **Auto-next countdown:** the deck uses `durationSeconds` from `/resolve`, plus a 6-second start allowance measured from when the song started (a length that arrives late does not restart the clock). When that countdown hits 0, **Pre-cue becomes Now Playing** and the first song still in Playlist refills Pre-cue. The finished song goes to Played. Manual **Play Next** uses that same swap. A saved queue cannot put the audible song back into Pre-cue. **Hold** and **+30s** adjust the countdown. If the length is unknown, it says so and waits for Play Next. Lock screen and notification show the song (Media Session); the notification's ⏭ uses the same Pre-cue swap.
   - **Embed autoplay:** after the first click on the deck, the next embed loads with `?autoplay=1` (Suno's own flag — it starts playback about a second later). A reload still waits for Resume or Next. If a browser blocks that timer-driven play, use the button inside Suno's player.
   - **Auto-next On/Off** switch, remembered on the phone.
   - **Visualizer:** five scenes — **Cyber Tunnel**, **Neon Fractal Plasma**, **3D Reactive Grid**, **Kaleidoscope**, **Liquid Waves**. One tap on the scene pill switches. While the Worker stream plays with CORS they react to the real audio (bass, mids, highs). Direct file playback and Suno's player use a beat engine (BPM pulse and a song-energy envelope), because that audio can't be analysed. Tap the visualizer to turn it off; tap the status line in time to set the beat engine's BPM. With reduced motion they run slowly. Phones without WebGL get the older bars and synthwave scene.
@@ -92,7 +93,8 @@ Songs play in Suno's own embedded player. The deck does not download, store, or 
 
 | File | Purpose |
 |---|---|
-| `index.html` | The whole deck: markup, inline compiled CSS, and script. No build step is needed to run it. |
+| `index.html` | The deck: markup, inline compiled CSS, and script. No build step is needed to run it. |
+| `deck-slots.js` | Now Playing / Pre-cue / Playlist rules, shared with `tools/deck-slots.test.mjs`. |
 | `submit.html` | The guest request page. Same single-file setup. |
 | `tools/build-css.mjs` | Optional. Regenerates the inline Tailwind CSS (v3.4.17) in both pages after you add or change classes: `node tools/build-css.mjs` |
 | `worker/src/index.js` | The Cloudflare Worker (`/resolve`, `/stream`, `/queue`, `/playlist`, `/submit`, `/inbox`). One file, no dependencies. |
@@ -113,3 +115,4 @@ Songs play in Suno's own embedded player. The deck does not download, store, or 
 | v3.5 | THADEUS-004 | Suno's embed is the player. The deck skips `/stream` and `cdn1.suno.ai` (`STREAM_ENABLED` defaults to false on the deck and the Worker) and no longer shows "Direct stream unavailable". Auto-next still counts down `durationSeconds` from `/resolve`, and the five-scene visualizer still runs on every song. |
 | v3.6 | THADEUS-005 | Auto-next archives the song that just finished (even if its row was still queued) and loads the next distinct Playlist song. After one click on the deck, later embeds use Suno's `?autoplay=1`. The deck and the guest page use a two-column layout on a wide window; phones stay a single column. |
 | v3.7 | THADEUS-006 | The embed countdown advances by itself. The end time stays tied to when the song started, a repeat of the current song is not treated as next while another song is queued, and the clock keeps trying (animation frame, a short worker tick, and when the tab wakes) instead of clearing itself before the next song has loaded. |
+| v3.8 | THADEUS-007 | Three slots: Now Playing, Pre-cue, Playlist. Auto-next and Play Next swap the pre-cued song in and refill Pre-cue from Playlist. A hidden Suno embed pre-loads the next song without autoplay. Queue sync cannot store the audible song as Pre-cue. |

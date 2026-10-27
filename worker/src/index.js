@@ -683,9 +683,15 @@ async function handleQueue(request, env) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.tracks)) return json({ ok: false, error: 'invalid_queue' }, 400);
   if (data.tracks.length > MAX_TRACKS) return json({ ok: false, error: 'too_many_tracks', max: MAX_TRACKS }, 413);
 
+  const nowPlaying = cleanTrack(data.nowPlaying);
+  let preCue = cleanTrack(data.preCue);
+  // The audible song is not a legal Pre-cue. Keeping it there made the next
+  // advance reload the song that was already playing.
+  if (preCue && nowPlaying && preCue.id === nowPlaying.id) preCue = null;
   const clean = {
     tracks: data.tracks.map(cleanTrack).filter(Boolean),
-    nowPlaying: cleanTrack(data.nowPlaying),
+    nowPlaying: nowPlaying,
+    preCue: preCue,
     activeTab: typeof data.activeTab === 'string' ? data.activeTab.slice(0, 20) : 'incoming',
     deckVersion: typeof data.deckVersion === 'string' ? data.deckVersion.slice(0, 20) : null,
     submissionsOpen: data.submissionsOpen !== false
@@ -770,6 +776,17 @@ async function handlePlaylist(env) {
   const played = tracks.filter((t) => t.status === 'played').sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
   const explicitlyPaused = !!(d && d.submissionsOpen === false);
   const sessionActive = !!nowPlaying || tracks.some((t) => t.status === 'incoming' || t.status === 'queued' || t.status === 'playing');
+  const npId = nowPlaying && nowPlaying.id;
+  let queued = tracks.filter((t) => t.status === 'queued' && t.id !== npId);
+  const cue = d && d.preCue;
+  if (cue && cue.id && cue.id !== npId) {
+    const idx = queued.findIndex((t) => t.id === cue.id);
+    if (idx > 0) {
+      const row = queued[idx];
+      queued.splice(idx, 1);
+      queued.unshift(row);
+    }
+  }
   return json({
     ok: true,
     updatedAt: stored ? stored.updatedAt : 0,
@@ -778,7 +795,7 @@ async function handlePlaylist(env) {
     submissionsOpen: !explicitlyPaused,
     inboxOpen: sessionActive || !explicitlyPaused,
     nowPlaying: nowPlaying,
-    upNext: tracks.filter((t) => t.status === 'queued').slice(0, 100).map(pick),
+    upNext: queued.slice(0, 100).map(pick),
     recent: played.slice(0, 10).map(pick),
     pendingCount: tracks.filter((t) => t.status === 'incoming').length,
     pendingSongs: tracks.filter((t) => t.status === 'incoming').map((t) => t.songUuid),
