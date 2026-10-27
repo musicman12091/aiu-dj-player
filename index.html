@@ -223,7 +223,7 @@
 
   <script>
     (function () {
-      const DECK_VERSION = '3.6';
+      const DECK_VERSION = '3.7';
       // Live Worker (Cloudflare account subdomain musicman12091). #worker= still overrides this.
       const DEFAULT_WORKER_URL = 'https://aiu-dj-worker.musicman12091.workers.dev';
       // Off by default. cdn1.suno.ai/<uuid>.mp3 is CloudFront 403 MissingKey, and Suno
@@ -1352,6 +1352,55 @@
         player.embedDeadline = 0;
         player.embedHold = false;
         player.embedLengthKnown = false;
+        player.embedForId = null;
+      }
+
+      // End of this embed, measured from when the song actually started — not from
+      // whenever /resolve finally returned the length. A late lookup used to add
+      // another full song, so the Suno player hit 0 while our countdown was still running.
+      function embedEndAt(track, dur) {
+        let started = track && track.startedAt;
+        if (!(started > 0) && state.nowPlaying && track && state.nowPlaying.id === track.id) {
+          started = state.nowPlaying.startedAt;
+        }
+        if (!(started > 0)) started = Date.now();
+        return started + (dur + EMBED_START_GRACE_S) * 1000;
+      }
+
+      // One advance attempt at a time. The animation frame and the hidden-tab
+      // worker both call this; without the lock they would stack transports.
+      let embedAdvanceLock = 0;
+      function maybeEmbedAdvance() {
+        if (embedAdvanceLock > Date.now()) return;
+        if (!autoAdvance || player.embedHold) return;
+        if (player.mode !== 'embed') return;
+        if (!player.embedLengthKnown || !(player.embedDeadline > 0)) return;
+        if (Date.now() < player.embedDeadline) return;
+        if (player.embedForId && player.trackId !== player.embedForId) return;
+        const leavingId = (state.nowPlaying && state.nowPlaying.id) || player.trackId;
+        const hasNext = state.tracks.some(function (t) {
+          return t.status === 'queued' && t.id !== leavingId;
+        });
+        embedAdvanceLock = Date.now() + (hasNext ? 500 : 2000);
+        autoAdvanceNow('embed-timer');
+      }
+
+      // setInterval is paused or dropped to once a minute when the tab is hidden
+      // and the embed goes quiet at the end of a song. A worker tick is what
+      // still reaches the deck on a locked phone.
+      function startEmbedClockWorker() {
+        if (player.embedWorker) return;
+        try {
+          const blob = new Blob(
+            ['setInterval(function(){postMessage(0)},250)'],
+            { type: 'text/javascript' }
+          );
+          const worker = new Worker(URL.createObjectURL(blob));
+          worker.onmessage = function () { maybeEmbedAdvance(); };
+          player.embedWorker = worker;
+        } catch (err) {
+          // The visible-tab clock (interval + animation frame) still runs.
+        }
       }
 
       // The Suno embed can't report when a song ends, so use the song length from /resolve.
@@ -1368,23 +1417,23 @@
           return;
         }
         player.embedLengthKnown = true;
-        player.embedDeadline = Date.now() + (dur + EMBED_START_GRACE_S) * 1000;
-        player.embedTick = setInterval(function () {
-          if (player.mode !== 'embed' || player.trackId !== track.id) {
-            clearEmbedTimer();
-            return;
-          }
-          if (player.embedHold || !autoAdvance) {
+        player.embedForId = track.id;
+        player.embedDeadline = embedEndAt(track, dur);
+        const timerId = setInterval(function () {
+          // A newer song already owns the clock. Do not clear that one.
+          if (player.embedTick !== timerId) return;
+          if (player.mode === 'embed' && player.trackId === track.id && (player.embedHold || !autoAdvance)) {
             player.embedDeadline += 1000;
-          } else if (Date.now() >= player.embedDeadline) {
-            clearEmbedTimer();
-            renderAutoRow();
-            autoAdvanceNow('embed-timer');
-            return;
           }
+          maybeEmbedAdvance();
+          if (player.embedTick !== timerId) return;
           renderAutoRow();
         }, 1000);
+        player.embedTick = timerId;
         renderAutoRow();
+        // Length can arrive after the embed has already finished. Advance now
+        // instead of waiting out a countdown that started too late.
+        maybeEmbedAdvance();
       }
 
       function autoAdvanceNow(why) {
@@ -1558,23 +1607,39 @@
         return true;
       }
 
+      // Next Playlist row. A second copy of the song already in the embed is not
+      // "next" when a different song is queued behind it — that replay looked like
+      // auto-next had done nothing. An intentional repeat still plays once it is
+      // the only thing left.
+      function pickNextQueued(leavingId, leavingUuid, tried) {
+        const queued = [];
+        state.tracks.forEach(function (t) {
+          if (t.status === 'queued' && t.id !== leavingId && !tried[t.id]) queued.push(t);
+        });
+        if (!queued.length) return null;
+        for (let i = 0; i < queued.length; i++) {
+          if (!leavingUuid || queued[i].songUuid !== leavingUuid) return queued[i];
+        }
+        return queued[0];
+      }
+
       // Play the first playable song in Playlist, skipping links that fail.
       // Never picks the row that is already in the embed, even if it is still queued.
       async function advanceToNextQueued(opts) {
         opts = opts || {};
         const leavingId = (state.nowPlaying && state.nowPlaying.id) || player.trackId || null;
         const leavingUuid = (state.nowPlaying && state.nowPlaying.songUuid) || player.songUuid || null;
+        const tried = {};
         let next;
         let skipped = 0;
-        while ((next = state.tracks.find(function (t) {
-          return t.status === 'queued' && t.id !== leavingId;
-        }))) {
+        while ((next = pickNextQueued(leavingId, leavingUuid, tried))) {
+          tried[next.id] = true;
           const replaySameSong = !!(leavingUuid && next.songUuid === leavingUuid);
           const ok = await playTrack(next, Object.assign({}, opts, {
             forceReload: !!opts.forceReload || replaySameSong
           }));
           if (ok) {
-            if (leavingId && state.nowPlaying && state.nowPlaying.id === leavingId) break;
+            if (leavingId && state.nowPlaying && state.nowPlaying.id === leavingId) continue;
             if (skipped) setStatus('Playing: ' + next.title + ' (skipped ' + skipped + ' failed)', 'warn');
             else if (opts.auto) setStatus('Auto-next: ' + next.title, 'info');
             return;
@@ -2163,6 +2228,7 @@
 
       function vizFrame(now) {
         requestAnimationFrame(vizFrame);
+        maybeEmbedAdvance();
         if (viz.reduced && now - viz.lastDraw < 100) return;
         viz.lastDraw = now;
         sizeCanvas();
@@ -2470,6 +2536,7 @@
             clearTimeout(sync.timer);
             pushQueue(true);
           } else if (document.visibilityState === 'visible') {
+            maybeEmbedAdvance();
             pullQueue(false);
             pollInbox(false);
           }
@@ -3292,6 +3359,9 @@
 
         wireAudio();
         initVisualizer();
+        startEmbedClockWorker();
+        window.addEventListener('pageshow', function () { maybeEmbedAdvance(); });
+        document.addEventListener('resume', function () { maybeEmbedAdvance(); });
 
         if (state.nowPlaying && !workerBase()) {
           // No Worker: restore the Suno embed like v2.x did.
