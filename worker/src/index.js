@@ -17,7 +17,7 @@
 // SUBMIT_GAP_SECONDS (optional, default 15: minimum gap between requests from one address).
 // TEST_SUNO_ORIGIN / TEST_CDN_ORIGINS exist only for local tests; never set them in production.
 
-const VERSION = '3.4.0';
+const VERSION = '3.4.1';
 const UUID_SRC = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const UUID_FULL = new RegExp('^' + UUID_SRC + '$');
 const SONG_PATH = new RegExp('/(?:song|embed)/(' + UUID_SRC + ')', 'i');
@@ -27,6 +27,7 @@ const MAX_QUEUE_BYTES = 1000000;
 const MAX_HTML_BYTES = 1500000;
 const RESOLVE_CACHE_MAX = 500;
 const RESOLVE_TTL_MS = 6 * 60 * 60 * 1000;
+const RESOLVE_INCOMPLETE_TTL_MS = 15 * 1000;
 const UA = 'AIU-DJ-Worker/' + VERSION + ' (+https://musicman12091.github.io/aiu-dj-player/)';
 // Browser-like headers. Suno serves the real audio_url to document navigations, not to bot UAs.
 const PAGE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -448,7 +449,10 @@ async function resolveSong(input, env, selfOrigin) {
 
   const memoKey = c.kind + ':' + (c.uuid || c.code);
   const hit = resolveMemo.get(memoKey);
-  if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return { status: 200, body: Object.assign({}, hit.body, { cached: true }) };
+  // A title-only page is not enough to arm the deck's auto-next timer. Briefly
+  // cache it to limit repeat lookups, then allow duration recovery on retry.
+  const hitTtl = hit && hit.body.durationSeconds > 0 ? RESOLVE_TTL_MS : RESOLVE_INCOMPLETE_TTL_MS;
+  if (hit && Date.now() - hit.at < hitTtl) return { status: 200, body: Object.assign({}, hit.body, { cached: true }) };
 
   let uuid = c.uuid || null;
   let html = null;

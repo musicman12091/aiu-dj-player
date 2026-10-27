@@ -152,9 +152,16 @@
       <div id="autoRow" class="hidden mt-2 flex items-center gap-1.5">
         <button id="btnAutoToggle" type="button" class="px-2.5 rounded-lg text-[11px] font-bold border transition bg-emerald-500/15 text-emerald-300 border-emerald-500/40">Auto-next: ON</button>
         <span id="autoText" class="flex-1 min-w-0 text-[11px] text-slate-400 leading-snug"></span>
+        <button id="btnRetryLength" type="button" class="hidden px-2.5 rounded-lg text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">Retry length</button>
         <button id="btnHold" type="button" class="hidden px-2.5 rounded-lg text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">Hold</button>
         <button id="btnPlus30" type="button" class="hidden px-2.5 rounded-lg text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">+30s</button>
       </div>
+
+      <details class="mt-2 text-[11px] text-slate-400">
+        <summary class="py-1">Playback status · this device</summary>
+        <p id="playbackStatusText" class="mt-1 leading-snug break-words"></p>
+        <button id="btnCopyPlaybackStatus" type="button" class="mt-1 px-2.5 rounded-lg text-[11px] font-semibold bg-slate-800 text-slate-200 border border-slate-700">Copy playback status</button>
+      </details>
 
       <!-- Transport Bar (↻ and ⚠ need a second tap to confirm) -->
       <div class="mt-2.5 flex items-center gap-2">
@@ -302,6 +309,8 @@
       const MAX_QUEUE_TRACKS = 500;
       const NATIVE_LOAD_TIMEOUT_MS = 12000;
       const EMBED_START_GRACE_S = 6;
+      const EMBED_META_RETRY_MS = 15000;
+      const EMBED_META_MAX_ATTEMPTS = 4;
       const SYNC_DEBOUNCE_MS = 6000;
       const SYNC_POLL_MS = 30000;
       const SYNC_MAX_WAIT_MS = 20000;
@@ -1033,15 +1042,16 @@
       }
 
       // Full song link: fetch title / artist / length. Never changes the song ID.
-      function fetchTitle(track, lane) {
-        if (!track || isShortId(track.songUuid) || !needsMeta(track)) return Promise.resolve(false);
+      function fetchTitle(track, lane, opts) {
+        opts = opts || {};
+        if (!track || isShortId(track.songUuid) || (!opts.requireDuration && !needsMeta(track))) return Promise.resolve(false);
         if (pendingResolves[track.id]) {
           if (lane === 'play') promoteJob(pendingResolves[track.id].job);
           return pendingResolves[track.id].promise;
         }
 
         const cached = resolveCache['t:' + track.songUuid];
-        if (cached && cached.title && (cached.durationSeconds > 0 || !workerBase() || cached.metaTried)) {
+        if (cached && cached.title && (validDuration(cached.durationSeconds) || (!opts.requireDuration && (!workerBase() || cached.metaTried)))) {
           applyResolved(track, cached);
           track.metaTried = true;
           syncNowPlayingMeta(track);
@@ -1088,7 +1098,7 @@
           renderNowPlayingMeta();
           updateMediaSession();
           if (player.mode === 'embed' && player.trackId === track.id && !player.embedLengthKnown && track.durationSeconds) {
-            scheduleEmbedAdvance(track);
+            armEmbedDeadline(track);
           }
           changed = true;
         }
@@ -1098,7 +1108,11 @@
           mountPreCueEmbed();
           changed = true;
         }
-        if (changed) saveState();
+        if (changed) {
+          saveState();
+          maybeEmbedAdvance();
+          renderAutoRow();
+        }
       }
 
       // Is this song already waiting or playing? (Pending, Playlist or Now Playing)
@@ -1143,11 +1157,9 @@
         updateMediaSession();
       }
 
-      // First click/key on the deck. Chrome keeps sticky activation for this document
-      // afterwards, and #sunoEmbedFrame has allow="autoplay", so a later timer can
-      // start the next embed. Suno waits ~1s and then calls play() itself — that
-      // call is not a fresh gesture. If a browser still blocks it, the play button
-      // inside the embed is the fallback. We do not turn STREAM_ENABLED back on.
+      // The parent must request autoplay when it mounts each song. Browser
+      // permission and Suno's own implementation still decide whether it starts;
+      // an iframe URL/load event is not playback confirmation.
       function noteUserGesture() {
         playbackUnlocked = true;
         try {
@@ -1166,8 +1178,7 @@
         }
       }
 
-      // Suno starts the song only when the URL has ?autoplay=1. Without it, every
-      // new embed waits for a click on its own play button.
+      // Ask Suno to start the newly navigated embed after a host gesture.
       function embedSrc(track, forceReload) {
         let src = 'https://suno.com/embed/' + track.songUuid;
         const params = [];
@@ -1202,6 +1213,7 @@
         const nextSrc = embedSrc(track, forceReload);
         const sameUuid = state.lastMountedUuid === track.songUuid;
         if (forceReload || !sameUuid || iframe.src !== nextSrc) {
+          player.embedLoadState = 'loading';
           iframe.src = nextSrc;
           state.lastMountedUuid = track.songUuid;
         }
@@ -1444,36 +1456,95 @@
         scheduleEmbedAdvance(track);
       }
 
+      function validDuration(value) {
+        return typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 7200;
+      }
+
       function clearEmbedTimer() {
         clearInterval(player.embedTick);
         player.embedTick = null;
+        player.embedGeneration = (player.embedGeneration || 0) + 1;
         player.embedDeadline = 0;
         player.embedHold = false;
         player.embedLengthKnown = false;
         player.embedForId = null;
+        player.embedPausedAt = 0;
+        player.embedPauseMs = 0;
+        player.embedMetaAttempts = 0;
+        player.embedMetaRetryAt = 0;
+        player.embedMetaPending = false;
       }
 
-      // End of this embed, measured from when the song actually started — not from
-      // whenever /resolve finally returned the length. A late lookup used to add
-      // another full song, so the Suno player hit 0 while our countdown was still running.
+      // This is a deck-owned estimate. The cross-origin embed does not report
+      // its real play/pause/end events to this page.
       function embedEndAt(track, dur) {
-        let started = track && track.startedAt;
-        if (!(started > 0) && state.nowPlaying && track && state.nowPlaying.id === track.id) {
-          started = state.nowPlaying.startedAt;
-        }
+        let started = state.nowPlaying && track && state.nowPlaying.id === track.id ? state.nowPlaying.startedAt : null;
+        if (!(started > 0)) started = track && track.startedAt;
         if (!(started > 0)) started = Date.now();
-        return started + (dur + EMBED_START_GRACE_S) * 1000;
+        return started + (dur + EMBED_START_GRACE_S) * 1000 + (player.embedPauseMs || 0);
       }
 
-      // One advance attempt at a time. The animation frame and the hidden-tab
-      // worker both call this; without the lock they would stack transports.
+      function updateEmbedPause(now) {
+        const paused = player.embedHold || !autoAdvance;
+        if (paused && !player.embedPausedAt) player.embedPausedAt = now;
+        if (player.embedPausedAt) {
+          const delta = Math.max(0, now - player.embedPausedAt);
+          player.embedPauseMs += delta;
+          if (player.embedDeadline) player.embedDeadline += delta;
+          player.embedPausedAt = paused ? now : 0;
+        }
+      }
+
+      function armEmbedDeadline(track) {
+        if (!track || player.mode !== 'embed' || player.trackId !== track.id || player.embedLengthKnown) return false;
+        const np = state.nowPlaying;
+        const dur = validDuration(track.durationSeconds) ? track.durationSeconds : np && np.id === track.id && np.durationSeconds;
+        if (!validDuration(dur)) return false;
+        if (np && np.id === track.id) np.durationSeconds = dur;
+        player.embedLengthKnown = true;
+        player.embedForId = track.id;
+        player.embedDeadline = embedEndAt(track, dur);
+        return true;
+      }
+
+      function retryEmbedLength(manual) {
+        if (player.mode !== 'embed' || player.embedLengthKnown || player.embedMetaPending || !workerBase()) return;
+        if (!manual && (player.embedMetaAttempts >= EMBED_META_MAX_ATTEMPTS || Date.now() < player.embedMetaRetryAt)) return;
+        const track = findTrack(player.trackId) || state.nowPlaying;
+        if (!track || track.id !== player.trackId || isShortId(track.songUuid)) return;
+        const generation = player.embedGeneration;
+        if (manual) player.embedMetaAttempts = 0;
+        player.embedMetaAttempts++;
+        player.embedMetaPending = true;
+        // A failed background lookup or old title-only cache must not disable
+        // the clock for the rest of this song/session.
+        fetchTitle(track, 'play', { requireDuration: true }).finally(function () {
+          if (generation !== player.embedGeneration || player.trackId !== track.id) return;
+          player.embedMetaPending = false;
+          player.embedMetaRetryAt = Date.now() + Math.min(60000, EMBED_META_RETRY_MS * Math.pow(2, player.embedMetaAttempts - 1));
+          armEmbedDeadline(findTrack(track.id) || track);
+          maybeEmbedAdvance();
+          renderAutoRow();
+        });
+        renderAutoRow();
+      }
+
       let embedAdvanceLock = 0;
       function maybeEmbedAdvance() {
-        if (embedAdvanceLock > Date.now()) return;
-        if (!autoAdvance || player.embedHold) return;
         if (player.mode !== 'embed') return;
-        if (!player.embedLengthKnown || !(player.embedDeadline > 0)) return;
-        if (Date.now() < player.embedDeadline) return;
+        player.embedLastTickAt = Date.now();
+        updateEmbedPause(Date.now());
+        // Also recover a length that arrived from another device. A previously
+        // unarmed local clock must not remain stopped after queue sync.
+        if (!player.embedLengthKnown) {
+          armEmbedDeadline(findTrack(player.trackId) || state.nowPlaying);
+          if (!player.embedLengthKnown) {
+            retryEmbedLength(false);
+            return;
+          }
+        }
+        if (embedAdvanceLock > Date.now() || !autoAdvance || player.embedHold) return;
+        if (!(player.embedDeadline > 0) || Date.now() < player.embedDeadline) return;
         if (player.embedForId && player.trackId !== player.embedForId) return;
         Slots.seal(state);
         const cue = state.preCue;
@@ -1483,54 +1554,34 @@
         autoAdvanceNow('embed-timer');
       }
 
-      // setInterval is paused or dropped to once a minute when the tab is hidden
-      // and the embed goes quiet at the end of a song. A worker tick is what
-      // still reaches the deck on a locked phone.
+      // Extra wake-up source. Browsers may still suspend a background/locked
+      // device; on returning to the page, recheck the wall-clock deadline.
       function startEmbedClockWorker() {
         if (player.embedWorker) return;
         try {
-          const blob = new Blob(
-            ['setInterval(function(){postMessage(0)},250)'],
-            { type: 'text/javascript' }
-          );
-          const worker = new Worker(URL.createObjectURL(blob));
+          const blob = new Blob(['setInterval(function(){postMessage(0)},250)'], { type: 'text/javascript' });
+          const workerUrl = URL.createObjectURL(blob);
+          const worker = new Worker(workerUrl);
+          URL.revokeObjectURL(workerUrl);
           worker.onmessage = function () { maybeEmbedAdvance(); };
           player.embedWorker = worker;
-        } catch (err) {
-          // The visible-tab clock (interval + animation frame) still runs.
-        }
+        } catch (err) { /* The interval and visible-tab clock remain available. */ }
       }
 
-      // The Suno embed can't report when a song ends, so use the song length from /resolve.
       function scheduleEmbedAdvance(track) {
         clearEmbedTimer();
-        const dur = track.durationSeconds || (state.nowPlaying && state.nowPlaying.id === track.id && state.nowPlaying.durationSeconds);
-        if (!dur) {
-          player.embedLengthKnown = false;
-          renderAutoRow();
-          if (workerBase() && !isShortId(track.songUuid)) {
-            const t = findTrack(track.id);
-            if (t && !t.metaTried) fetchTitle(t, 'play');
-          }
-          return;
-        }
-        player.embedLengthKnown = true;
         player.embedForId = track.id;
-        player.embedDeadline = embedEndAt(track, dur);
+        updateEmbedPause(Date.now());
+        armEmbedDeadline(track);
+        // Always run the deck clock, even while length is missing. Otherwise
+        // one metadata miss leaves no timer available to retry or recover.
         const timerId = setInterval(function () {
-          // A newer song already owns the clock. Do not clear that one.
           if (player.embedTick !== timerId) return;
-          if (player.mode === 'embed' && player.trackId === track.id && (player.embedHold || !autoAdvance)) {
-            player.embedDeadline += 1000;
-          }
           maybeEmbedAdvance();
-          if (player.embedTick !== timerId) return;
-          renderAutoRow();
+          if (player.embedTick === timerId) renderAutoRow();
         }, 1000);
         player.embedTick = timerId;
         renderAutoRow();
-        // Length can arrive after the embed has already finished. Advance now
-        // instead of waiting out a countdown that started too late.
         maybeEmbedAdvance();
       }
 
@@ -1544,7 +1595,14 @@
           setStatus('Playlist finished — add or approve more songs', 'warn');
           return;
         }
-        const job = function () { return advanceToNextQueued({ auto: why }); };
+        const leavingId = player.trackId;
+        const generation = player.embedGeneration;
+        const job = function () {
+          // Several clock ticks can arrive while a short link is resolving.
+          // Once one transition succeeds, the others belong to the old song.
+          if (!autoAdvance || player.embedHold || player.trackId !== leavingId || player.embedGeneration !== generation) return;
+          return advanceToNextQueued({ auto: why });
+        };
         // A lookup still in flight used to drop this advance and leave the timer cleared.
         if (transportBusy) {
           transportFollowUp = job;
@@ -1553,15 +1611,56 @@
         runTransport(job);
       }
 
+      function playbackStatus() {
+        const now = Date.now();
+        let blocked = null;
+        if (!player.mode) blocked = 'Playback is not started on this device';
+        else if (!autoAdvance) blocked = 'Auto-next is OFF on this device';
+        else if (player.embedHold) blocked = 'Countdown is on Hold';
+        else if (player.mode === 'embed' && !player.embedLengthKnown) blocked = 'Song length is missing';
+        else if (transportBusy) blocked = 'A track switch is in progress';
+        else if (!state.preCue) blocked = 'No next song is queued';
+        return {
+          deckVersion: DECK_VERSION,
+          capturedAt: new Date(now).toISOString(),
+          devicePlayback: player.mode || 'idle',
+          queueSync: sync.status,
+          canSaveQueue: !!hostKey(),
+          nowPlayingId: state.nowPlaying && state.nowPlaying.id,
+          mountedSongUuid: player.songUuid || null,
+          nextSongUuid: state.preCue && state.preCue.songUuid,
+          autoNext: autoAdvance,
+          hold: !!player.embedHold,
+          durationSeconds: state.nowPlaying && state.nowPlaying.durationSeconds,
+          deadline: player.embedDeadline || null,
+          remainingSeconds: player.embedDeadline ? Math.max(0, Math.round((player.embedDeadline - now) / 1000)) : null,
+          lastClockTick: player.embedLastTickAt || null,
+          lengthLookupAttempts: player.embedMetaAttempts || 0,
+          embedLoad: player.embedLoadState || 'not mounted',
+          playbackConfirmed: player.mode === 'native' ? !!(activeAudio() && !activeAudio().paused) : null,
+          blocked: blocked,
+          lastTransitionError: player.lastTransportError || null
+        };
+      }
+
       function renderAutoRow() {
         const toggle = document.getElementById('btnAutoToggle');
         const text = document.getElementById('autoText');
         const hold = document.getElementById('btnHold');
         const plus = document.getElementById('btnPlus30');
+        const retry = document.getElementById('btnRetryLength');
+        const diagnostic = document.getElementById('playbackStatusText');
+        const report = playbackStatus();
+        diagnostic.textContent = (report.blocked || 'Deck countdown is armed') +
+          '. Suno playback inside the embed is not confirmed by this page. Play Next controls this device; the queue is shared.' +
+          (report.lastTransitionError ? ' Last switch: ' + report.lastTransitionError : '');
         toggle.textContent = 'Auto-next: ' + (autoAdvance ? 'ON' : 'OFF');
         toggle.className = 'px-2.5 rounded-lg text-[11px] font-bold border transition ' +
           (autoAdvance ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' : 'bg-slate-800 text-slate-400 border-slate-700');
         const embedTimed = player.mode === 'embed' && player.embedLengthKnown && player.embedDeadline;
+        retry.classList.toggle('hidden', player.mode !== 'embed' || !!embedTimed);
+        retry.disabled = !!player.embedMetaPending || !workerBase();
+        retry.textContent = player.embedMetaPending ? 'Checking…' : 'Retry length';
         hold.classList.toggle('hidden', !embedTimed);
         plus.classList.toggle('hidden', !embedTimed);
         hold.textContent = player.embedHold ? 'Resume' : 'Hold';
@@ -1571,9 +1670,13 @@
           if (embedTimed) {
             const left = (player.embedDeadline - Date.now()) / 1000;
             const cueName = state.preCue && state.preCue.title ? ' · ' + state.preCue.title : '';
-            text.textContent = !autoAdvance ? 'Auto-next paused' : player.embedHold ? 'Countdown held at ' + fmtClock(left) : 'Next in ' + fmtClock(left) + cueName;
+            text.textContent = !autoAdvance ? 'Auto-next paused' : player.embedHold ? 'Countdown held at ' + fmtClock(left) : 'Next in ~' + fmtClock(left) + cueName;
           } else {
-            text.textContent = 'Song length unknown — tap Next when it ends';
+            text.textContent = !autoAdvance ? 'Auto-next OFF · length unknown' :
+              player.embedMetaPending ? 'Checking song length to arm auto-next…' :
+              player.embedMetaAttempts < EMBED_META_MAX_ATTEMPTS && workerBase() ?
+                'Waiting for song length · retry in ' + Math.max(0, Math.ceil((player.embedMetaRetryAt - Date.now()) / 1000)) + 's' :
+                'Auto-next blocked: song length unknown · Retry length or Play Next';
           }
         } else {
           text.textContent = '';
@@ -1666,12 +1769,15 @@
           }
         }
 
+        // Host can put the countdown on Hold while a short link resolves.
+        // Finish that lookup, but do not switch songs after the pause request.
+        if (opts && opts.auto && (!autoAdvance || player.embedHold)) return false;
         Slots.commitPlayed(state, track, Date.now());
         trimPlayed();
         startPlayback(track, opts);
         saveState();
         renderQueue();
-        setStatus('Playing: ' + track.title, 'info');
+        setStatus('Loaded: ' + track.title + ' — playback requested from Suno', 'info');
         if (needsMeta(track)) fetchTitle(track, player.mode === 'embed' ? 'play' : 'bg');
         return true;
       }
@@ -1682,9 +1788,13 @@
           return false;
         }
         transportBusy = true;
+        player.lastTransportError = null;
         Promise.resolve()
           .then(fn)
-          .catch(function () {})
+          .catch(function (err) {
+            player.lastTransportError = String(err && err.message || 'Unknown transition error').slice(0, 200);
+            setStatus('Track switch hit an error — check Now Playing and use Play Next to retry.', 'error');
+          })
           .then(function () {
             transportBusy = false;
             const followUp = transportFollowUp;
@@ -1724,6 +1834,7 @@
             else setStatus('Play Next: ' + next.title, 'info');
             return;
           }
+          if (opts.auto && (!autoAdvance || player.embedHold)) return;
           skipped += 1;
           state.preCue = null;
           if (next.status === 'queued') break;
@@ -2482,6 +2593,10 @@
           saveState({ fromSync: !localOnly.length });
           renderQueue();
           renderNowPlayingMeta();
+          if (playingLocally) {
+            maybeEmbedAdvance();
+            renderAutoRow();
+          }
           if (!initial) setStatus('Queue updated from another tab or device', 'info');
           else if (localOnly.length) setStatus('Merged ' + localOnly.length + ' song(s) from this phone with the saved queue', 'info');
         } catch (err) {
@@ -3251,6 +3366,7 @@
           noteUserGesture();
           if (state.nowPlaying && !player.mode && workerBase()) {
             const t = findTrack(state.nowPlaying.id) || state.nowPlaying;
+            t.startedAt = Date.now();
             markPlaying(t);
             startPlayback(t, { fromGesture: true, forceReload: true });
             saveState();
@@ -3274,6 +3390,8 @@
           }
           armOrRun(btn, function () {
             const t = findTrack(state.nowPlaying.id) || state.nowPlaying;
+            t.startedAt = Date.now();
+            setNowPlaying(t);
             if (player.mode === 'embed' || !workerBase()) {
               player.trackId = t.id;
               player.songUuid = t.songUuid;
@@ -3282,7 +3400,8 @@
               delete lockedStreams[t.songUuid];
               startPlayback(t, { fromGesture: true, forceReload: true });
             }
-            setStatus('Reloaded current player', 'info');
+            saveState();
+            setStatus('Reloaded current player — countdown restarted', 'info');
           });
         });
 
@@ -3296,14 +3415,34 @@
         });
 
         document.getElementById('btnAutoToggle').addEventListener('click', function () {
+          if (player.mode === 'embed') updateEmbedPause(Date.now());
           autoAdvance = !autoAdvance;
+          if (player.mode === 'embed') updateEmbedPause(Date.now());
           lsSet(SETTINGS.auto, autoAdvance ? null : 'off');
           renderAutoRow();
           setStatus(autoAdvance ? 'Auto-next on' : 'Auto-next off — the deck stops after each song', 'info');
         });
 
         document.getElementById('btnHold').addEventListener('click', function () {
+          updateEmbedPause(Date.now());
           player.embedHold = !player.embedHold;
+          updateEmbedPause(Date.now());
+          renderAutoRow();
+        });
+
+        document.getElementById('btnRetryLength').addEventListener('click', function () { retryEmbedLength(true); });
+
+        document.getElementById('btnCopyPlaybackStatus').addEventListener('click', function () {
+          const text = JSON.stringify(playbackStatus(), null, 2);
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+              setStatus('Playback status copied — no host key included', 'info');
+            }).catch(function () { setStatus('Copy unavailable in this browser', 'warn'); });
+          } else setStatus('Copy unavailable in this browser', 'warn');
+        });
+        document.getElementById('sunoEmbedFrame').addEventListener('load', function () {
+          if (player.mode !== 'embed') return;
+          player.embedLoadState = 'loaded (playback unconfirmed)';
           renderAutoRow();
         });
 
@@ -3384,6 +3523,7 @@
         version: DECK_VERSION,
         streamEnabled: STREAM_ENABLED,
         playbackUnlocked: function () { return playbackUnlocked; },
+        playbackStatus: playbackStatus,
         player: player,
         viz: viz,
         sync: sync,
