@@ -4,7 +4,7 @@
 
 A single-page DJ deck for running live Suno listening parties from a phone or a desktop window (built for a Samsung Galaxy A57 and a Chrome window shared in Discord).
 
-Current version: **v3.9**
+Current version: **v4.0**
 
 **Guest request page:** https://musicman12091.github.io/aiu-dj-player/submit.html (needs the Worker)
 
@@ -13,12 +13,12 @@ Current version: **v3.9**
 | | Without a Worker (default) | With the `aiu-dj-worker` Cloudflare Worker |
 |---|---|---|
 | Song lookups | Free public services (Microlink, allorigins, corsproxy.io): roughly 12–25 short links a day | Your Worker, which follows `suno.com/s/…` links itself: no daily lookup cap worth worrying about |
-| Playback | Suno's embedded player. Auto-next waits for a tap when the length is unknown | Suno's embedded player, loaded straight into the iframe. Auto-next counts down `durationSeconds` from `/resolve`. Direct `/stream` and `cdn1.suno.ai` probes stay off unless `STREAM_ENABLED` is turned on |
-| Visualizer | Real audio via host-tab capture in desktop Chrome/Edge | Same tab capture; an enabled CORS native stream can also feed analysis |
+| Playback | Suno's embedded player. Auto-next waits for a tap when the length is unknown | Suno's embedded player, loaded straight into the iframe. Auto-next counts down `durationSeconds` from `/resolve`. Direct `/stream` and `cdn1.suno.ai` probes stay off (`STREAM_ENABLED` is false). The deck does not warn that a direct file could not play |
+| Install | Add to Home Screen / install as an app. `manifest.json` opens the deck; the shortcut opens guest requests | Same manifest and service worker. The worker API and Suno embeds are not cached |
 | Queue storage | This browser only | Saved to Cloudflare KV as well, so it survives cache clears and shows on other devices |
 | Guest requests | Not available | Guests send songs from `submit.html`; they land in your Pending tab with their name and note |
 
-The visualizer capture path is independent of the Worker. Queue and playback behavior are unchanged by this repair.
+The WebGL/canvas visualizer is gone. Queue, Pre-cue, and auto-next behavior are unchanged by that removal.
 
 ## Connecting the Worker
 
@@ -39,7 +39,6 @@ The deck and the guest page already use that Worker address when `#worker=` is m
   - **Embed autoplay:** after a host gesture, the deck navigates each new embed with `?autoplay=1` and delegates the autoplay permission. This requests playback; it cannot confirm that Suno started sound or bypass a browser refusal. If the browser blocks playback, use the Suno play control. Tests distinguish requesting autoplay from verified audible playback.
   - **Playback status:** an expandable panel reports this device's clock/queue blocker and lets the host copy a diagnostic snapshot without the host key. The queue is shared across devices, but Play Next controls the device where it is pressed; it is not a remote PC transport command.
   - **Auto-next On/Off** switch, remembered on the phone.
-  - **Visualizer:** five scenes — **Cyber Tunnel**, **Neon Fractal Plasma**, **3D Reactive Grid**, **Kaleidoscope**, **Liquid Waves**. Scenes now use measured bass/mids/highs, RMS level, and detected audio onsets. Scene motion accumulates from measured energy. No guessed BPM, synthetic kick/snare pattern, or estimated song envelope. Without WebGL, real spectrum bars and waveform remain available. Silence settles to idle; missing capture is explicitly labeled. Tap the canvas to hide/show visuals without stopping capture; **Stop audio sync** releases capture. Reduced motion lowers draw frequency and disables beat flashes.
   - After a reload, a **▶ Resume** button brings back the last song. Nothing starts playing by itself.
 - **Fetch and Submit:** paste Suno song links, `suno.com/s/…` short links (with or without `https://`), bare song IDs, or a whole Discord message. Playlist links, cover-image links and duplicates are refused with a message. Song length shows on each card when known.
 - **Tabs**
@@ -53,22 +52,15 @@ The deck and the guest page already use that Worker address when `#worker=` is m
   - All buttons are at least 44 px, and pinch-to-zoom works.
   - Next looks a short link up *before* switching. If it's dead, the current song keeps playing.
 
-## Connect the visualizer to Suno audio (desktop host)
+## Install the deck
 
-1. Open the DJ deck in desktop Chrome or Edge, then click **Sync to music**.
-2. In the browser picker, choose **this DJ deck tab**, enable **Share tab audio**, then click **Share**.
-3. Play music in the Suno embed. The label changes from **Connected · waiting for sound** to **Live audio · bass / mids / highs** when sound arrives. Capture stays connected across song swaps.
-4. Share the host window to Discord as usual. Use the phone for queue control.
+`index.html` and `submit.html` are one installable app (`display: standalone`).
 
-The browser requires explicit selection every new capture session; it cannot be silently preapproved. Selecting a window/screen or omitting tab audio produces a recoverable message. A browser-tab selection is checked where the browser exposes its surface type; the host still must select the correct DJ tab. Unsupported devices show a desktop-host instruction.
+- Both pages link `manifest.json`, set `theme-color` to `#090b10`, and set the Apple web-app metas (`apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`, `apple-mobile-web-app-title`).
+- `sw.js` precaches the app shell (both HTML pages, `deck-slots.js`, the manifest, and the PNG icons) and falls back to that cache when this origin is offline. It does not intercept `aiu-dj-worker.musicman12091.workers.dev` or Suno. Cloudflare Pages serves `manifest.json` and `sw.js` from the repo root (`_headers` sets the manifest type and keeps the service worker uncached).
+- Icons are PNG files in `icons/` (192 and 512, plus a maskable 512 and the Submit shortcut). Chrome does not treat the data-URI SVG from the ticket as an installable icon, so the manifest points at these files. The artwork matches that SVG: green **AIU** on `#10b981`, and a sky **+** for guest requests.
 
-Tab capture feeds only a local `MediaStreamAudioSourceNode → AnalyserNode`. Its output is never connected to speakers, so it does not replay captured sound. Suno stays the playback source. No recording, media upload, artist-file download, or rehosting is introduced. The required video track is kept alive at low frame rate but is never rendered or recorded. Native CORS playback, if explicitly enabled, retains its existing audible graph.
-
-**Playback timing:** sound analysis follows actual pause/seek/resume, but does not interpret silence as a song ending. Auto-next still uses a deck-owned estimate. Use Hold when pausing inside Suno; the parent page cannot read that internal pause event.
-
-**Validation boundary:** automated tests cover real Web Audio analysis with generated tones and mocked browser capture selection, plus queue regressions. Release acceptance still requires the host's real Suno playback and simultaneous Discord sharing: verify pause/resume, seek, a quiet passage, two song swaps, Stop sharing, cancellation, and selecting without audio. Browser capture/device latency varies; no exact millisecond sync guarantee is made.
-
-References: [Chrome sharing controls](https://developer.chrome.com/docs/web-platform/screen-sharing-controls), [AnalyserNode](https://developer.mozilla.org/en-US/docs/Web/API/AnalyserNode), [Web Audio CORS restriction](https://www.w3.org/TR/webaudio-1.0/#MediaElementAudioSourceNode).
+**Playback timing:** auto-next still uses a deck-owned estimate. Use Hold when pausing inside Suno; the parent page cannot read that internal pause event.
 
 ## Guest request page (`submit.html`)
 
@@ -100,7 +92,7 @@ One screen, top to bottom on a phone. On a wide window the request form sits bes
 
 ## Where data lives
 
-- On the phone: browser local storage (queue, history, remembered lookups, Worker address, host key, Auto-next and visualizer settings). Different browsers, including an app's built-in browser, keep separate copies.
+- On the phone: browser local storage (queue, history, remembered lookups, Worker address, host key, and Auto-next). Different browsers, including an app's built-in browser, keep separate copies. An installed PWA keeps that same storage for its origin.
 - With the Worker: one copy of the queue in your Cloudflare KV namespace `AIU_QUEUE_KV`.
 
 ## Audio and Suno's terms
@@ -112,9 +104,12 @@ Songs play in Suno's own embedded player. The deck does not download, store, or 
 | File | Purpose |
 |---|---|
 | `index.html` | The deck: markup, inline compiled CSS, and script. No build step is needed to run it. |
-| `audio-reactivity.js` | Local tab-capture lifecycle and measured spectrum/RMS/onset features; no synthetic fallback. |
+| `audio-reactivity.js` | Unused by the deck after the visualizer was removed. Kept so `tools/audio-reactivity.test.mjs` still runs. |
 | `deck-slots.js` | Now Playing / Pre-cue / Playlist rules, shared with `tools/deck-slots.test.mjs`. |
 | `submit.html` | The guest request page. Same single-file setup. |
+| `manifest.json` | Installable PWA manifest for the deck and the guest page. |
+| `sw.js` | App-shell service worker. Does not cache the Worker API or Suno. |
+| `icons/` | PNG icons used by the manifest and Apple touch icon. |
 | `tools/build-css.mjs` | Optional. Regenerates the inline Tailwind CSS (v3.4.17) in both pages after you add or change classes: `node tools/build-css.mjs` |
 | `worker/src/index.js` | The Cloudflare Worker (`/resolve`, `/stream`, `/queue`, `/playlist`, `/submit`, `/inbox`). One file, no dependencies. |
 | `worker/wrangler.toml` | Worker settings for `wrangler deploy` (KV binding included; the host key is a secret and is never committed). |
@@ -137,9 +132,10 @@ Songs play in Suno's own embedded player. The deck does not download, store, or 
 | v3.8 | THADEUS-007 | Three slots: Now Playing, Pre-cue, Playlist. Auto-next and Play Next swap the pre-cued song in and refill Pre-cue from Playlist. A hidden Suno embed pre-loads the next song without autoplay. Queue sync cannot store the audible song as Pre-cue. |
 
 | v3.9 | THADEUS playback + visualizer repair | Real tab-audio visualizer; resilient estimated auto-next clock, bounded metadata recovery, sync recovery, pause/restart handling, transition guards, and per-device playback diagnostics. Removes procedural beat fallbacks. |
+| v4.0 | THADEUS-009 | Removes the WebGL/canvas visualizer. Suno embed stays the player (`STREAM_ENABLED` false, no direct-stream warning). Host deck and guest page install as a standalone PWA. Pre-cue, auto-next, and Play Next stay. |
 
 ## Repair verification
 
-`node --test tools/audio-reactivity.test.mjs tools/deck-slots.test.mjs tools/worker-resolve-cache.test.mjs` covers audio features/capture, queue slots, and duration-cache recovery. `tools/verify-visualizer.mjs` and `tools/verify-auto-next.mjs` use puppeteer-core and a locally installed Chromium/Chrome (set `PUPPETEER_RESOLVE_FROM` and `CHROME` as needed). The visualizer test serves itself; serve the deck locally for the auto-next test. Browser tests use generated audio or mocked Suno navigation, never production queue writes. They do not confirm real Suno playback.
+`node --test tools/audio-reactivity.test.mjs tools/deck-slots.test.mjs tools/deck-shell.test.mjs tools/worker-resolve-cache.test.mjs` covers the unused audio-feature module, queue slots, the visualizer-free PWA shell, and duration-cache recovery. `tools/verify-visualizer.mjs` runs the shell checks. `tools/verify-auto-next.mjs` still uses puppeteer-core and a locally installed Chromium/Chrome (set `PUPPETEER_RESOLVE_FROM` and `CHROME` as needed). Serve the deck locally for the auto-next test. Browser tests use mocked Suno navigation, never production queue writes. They do not confirm real Suno playback.
 
 Worker 3.4.1 retries cached title-only metadata after 15 seconds; complete duration metadata retains the six-hour cache. This allows subsequent deck length retries to recover instead of repeatedly receiving an incomplete cached result.
